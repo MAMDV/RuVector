@@ -27,6 +27,68 @@ const ROUTE_SATURATION_DEG: f64 = 60.0;
 const HOUR_WINDOW: i64 = 2;
 const HOUR_SATURATION: f64 = 3.0;
 
+/// Minimal per-track summary carrying exactly the features §15 scoring needs.
+///
+/// This is the shared scoring input for **both** ingestion paths: the native
+/// pipeline derives it from a full [`Track`] (`TrackSummary::from(&track)`),
+/// while the browser dashboard (`sky-monitor-wasm`) deserializes it straight
+/// from JSON — no `Track` reconstruction required.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackSummary {
+    pub icao24: String,
+    #[serde(default)]
+    pub callsign: String,
+    /// Mean barometric altitude over the track, metres.
+    pub mean_alt_m: f64,
+    /// Circular-mean ground track, degrees in `[0, 360)`.
+    pub dominant_heading_deg: f64,
+    /// UTC hour (0–23) the track started.
+    pub start_hour: u32,
+    /// Mean receiver signal strength, dBFS.
+    pub mean_signal_dbfs: f64,
+    /// Minimum slant range to the observer, metres (context for consumers).
+    #[serde(default)]
+    pub min_range_m: f64,
+    /// Maximum elevation seen, degrees (context for consumers).
+    #[serde(default)]
+    pub max_elevation_deg: f64,
+}
+
+impl From<&Track> for TrackSummary {
+    fn from(t: &Track) -> Self {
+        // One pass over the points for the altitude/signal means and the
+        // circular-mean heading (the dedicated Track methods would each walk
+        // the point list separately).
+        let mut alt_sum = 0.0f64;
+        let mut sig_sum = 0.0f64;
+        let mut head_s = 0.0f64;
+        let mut head_c = 0.0f64;
+        for p in &t.points {
+            alt_sum += p.alt_m;
+            sig_sum += p.signal_dbfs;
+            let r = p.track_deg.to_radians();
+            head_s += r.sin();
+            head_c += r.cos();
+        }
+        let np = t.points.len();
+        let (mean_alt_m, mean_signal_dbfs) = if np == 0 {
+            (0.0, 0.0)
+        } else {
+            (alt_sum / np as f64, sig_sum / np as f64)
+        };
+        Self {
+            icao24: t.icao24.clone(),
+            callsign: t.callsign.clone(),
+            mean_alt_m,
+            dominant_heading_deg: crate::coords::normalize_deg(head_s.atan2(head_c).to_degrees()),
+            start_hour: t.start_hour_utc(),
+            mean_signal_dbfs,
+            min_range_m: t.min_range_m,
+            max_elevation_deg: t.max_elevation_deg,
+        }
+    }
+}
+
 /// Baseline statistics over prior tracks.
 #[derive(Debug, Clone, Default)]
 pub struct BaselineStats {
@@ -44,12 +106,18 @@ pub struct BaselineStats {
 impl BaselineStats {
     /// Build baseline statistics from prior tracks.
     pub fn from_tracks(prior: &[Track]) -> Self {
+        Self::from_summaries(&prior.iter().map(TrackSummary::from).collect::<Vec<_>>())
+    }
+
+    /// Build baseline statistics from prior track summaries (shared by the
+    /// native pipeline and the wasm dashboard scorer).
+    pub fn from_summaries(prior: &[TrackSummary]) -> Self {
         let n = prior.len();
         if n == 0 {
             return Self::default();
         }
-        let alts: Vec<f64> = prior.iter().map(|t| t.mean_altitude_m()).collect();
-        let sigs: Vec<f64> = prior.iter().map(|t| t.mean_signal_dbfs()).collect();
+        let alts: Vec<f64> = prior.iter().map(|t| t.mean_alt_m).collect();
+        let sigs: Vec<f64> = prior.iter().map(|t| t.mean_signal_dbfs).collect();
         let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
         let std = |v: &[f64], m: f64| {
             (v.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / v.len() as f64).sqrt()
@@ -58,10 +126,10 @@ impl BaselineStats {
         let sm = mean(&sigs);
         let mut hours = [0u32; 24];
         for t in prior {
-            hours[t.start_hour_utc() as usize] += 1;
+            hours[(t.start_hour % 24) as usize] += 1;
         }
         Self {
-            corridor_headings: prior.iter().map(|t| t.dominant_heading_deg()).collect(),
+            corridor_headings: prior.iter().map(|t| t.dominant_heading_deg).collect(),
             altitude_mean_m: am,
             altitude_std_m: std(&alts, am).max(500.0), // floor: avoid div-by-~0
             signal_mean_dbfs: sm,
@@ -164,7 +232,33 @@ pub fn score_track(
     novelty: f64,
     cross_sensor: f64,
 ) -> AnomalyReport {
-    let heading = track.dominant_heading_deg();
+    score_summary_as(cfg, &track.track_id, &TrackSummary::from(track), baseline, novelty, cross_sensor)
+}
+
+/// Score a [`TrackSummary`] against the baseline — same formula, reasons, and
+/// bands as [`score_track`], for callers (e.g. the wasm dashboard) that only
+/// have summary features. The report's `track_id` is derived from the icao24.
+pub fn score_summary(
+    cfg: &AnomalyConfig,
+    summary: &TrackSummary,
+    baseline: &BaselineStats,
+    novelty: f64,
+    cross_sensor: f64,
+) -> AnomalyReport {
+    let track_id = format!("track-{}", summary.icao24);
+    score_summary_as(cfg, &track_id, summary, baseline, novelty, cross_sensor)
+}
+
+/// Shared §15 scorer over summary features.
+fn score_summary_as(
+    cfg: &AnomalyConfig,
+    track_id: &str,
+    track: &TrackSummary,
+    baseline: &BaselineStats,
+    novelty: f64,
+    cross_sensor: f64,
+) -> AnomalyReport {
+    let heading = track.dominant_heading_deg;
     let nearest_corridor = baseline
         .corridor_headings
         .iter()
@@ -176,19 +270,19 @@ pub fn score_track(
         0.5 // no baseline corridors yet
     };
 
-    let alt_z = (track.mean_altitude_m() - baseline.altitude_mean_m).abs() / baseline.altitude_std_m.max(1.0);
+    let alt_z = (track.mean_alt_m - baseline.altitude_mean_m).abs() / baseline.altitude_std_m.max(1.0);
     let altitude_deviation = (alt_z / Z_SQUASH).min(1.0);
 
     // Rarity of the start hour: how many prior tracks started within ±2 h
     // (circular over the day); 3+ neighbours = fully ordinary.
-    let hour = track.start_hour_utc() as i64;
+    let hour = track.start_hour as i64;
     let mut window_count = 0u32;
     for dh in -HOUR_WINDOW..=HOUR_WINDOW {
         window_count += baseline.hour_counts[((hour + dh).rem_euclid(24)) as usize];
     }
     let time_of_day_rarity = (1.0 - f64::from(window_count) / HOUR_SATURATION).max(0.0);
 
-    let sig_z = (track.mean_signal_dbfs() - baseline.signal_mean_dbfs).abs() / baseline.signal_std_dbfs;
+    let sig_z = (track.mean_signal_dbfs - baseline.signal_mean_dbfs).abs() / baseline.signal_std_dbfs;
     let signal_unusualness = (sig_z / Z_SQUASH).min(1.0);
 
     let components = AnomalyComponents {
@@ -215,21 +309,19 @@ pub fn score_track(
     if components.altitude_deviation > 0.5 {
         reasons.push(format!(
             "mean altitude {:.0} m deviates {alt_z:.1}σ from the local baseline ({:.0} m)",
-            track.mean_altitude_m(),
-            baseline.altitude_mean_m
+            track.mean_alt_m, baseline.altitude_mean_m
         ));
     }
     if components.time_of_day_rarity > 0.5 {
         reasons.push(format!(
             "start time {:02}:xx UTC has {window_count} prior tracks within ±{HOUR_WINDOW} h",
-            track.start_hour_utc()
+            track.start_hour
         ));
     }
     if components.signal_unusualness > 0.5 {
         reasons.push(format!(
             "signal {:.1} dBFS is {sig_z:.1}σ from baseline {:.1} dBFS (unusually close/strong)",
-            track.mean_signal_dbfs(),
-            baseline.signal_mean_dbfs
+            track.mean_signal_dbfs, baseline.signal_mean_dbfs
         ));
     }
     if components.cross_sensor_confirmation > 0.5 {
@@ -247,12 +339,12 @@ pub fn score_track(
     if reasons.is_empty() {
         reasons.push(format!(
             "within normal envelope: heading {heading:.0}°, altitude {:.0} m, score {score:.2}",
-            track.mean_altitude_m()
+            track.mean_alt_m
         ));
     }
 
     AnomalyReport {
-        track_id: track.track_id.clone(),
+        track_id: track_id.to_string(),
         icao24: track.icao24.clone(),
         callsign: track.callsign.clone(),
         score,

@@ -163,6 +163,64 @@ impl Pipeline {
             brief,
         })
     }
+
+    /// Serialize a run for the canvas dashboard (`ui/dashboard`): observer
+    /// position plus per-track point series and anomaly verdicts.
+    ///
+    /// Shape: `{ observer: {name, lat, lon, alt_m}, day_start, tracks: [{
+    /// icao24, callsign, overhead, points: [{t, lat, lon, alt_m}], anomaly:
+    /// {score, band, reasons} | null }] }` — `t` is Unix epoch seconds and
+    /// `anomaly` is `null` for the unscored baseline tracks (ADR §26).
+    pub fn demo_export_json(&self, report: &PipelineReport) -> serde_json::Value {
+        let round = |v: f64, scale: f64| (v * scale).round() / scale;
+        let tracks: Vec<serde_json::Value> = report
+            .tracks
+            .iter()
+            .map(|t| {
+                let anomaly = report
+                    .reports
+                    .iter()
+                    .find(|r| r.track_id == t.track_id)
+                    .map(|r| {
+                        serde_json::json!({
+                            "score": round(r.score, 1e3),
+                            "band": r.band.to_string(),
+                            "reasons": r.reasons,
+                        })
+                    })
+                    .unwrap_or(serde_json::Value::Null);
+                let points: Vec<serde_json::Value> = t
+                    .points
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "t": p.ts.timestamp(),
+                            "lat": round(p.lat, 1e6),
+                            "lon": round(p.lon, 1e6),
+                            "alt_m": round(p.alt_m, 10.0),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "icao24": t.icao24,
+                    "callsign": t.callsign,
+                    "overhead": t.is_overhead_candidate,
+                    "points": points,
+                    "anomaly": anomaly,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "observer": {
+                "name": self.observer.name,
+                "lat": self.observer.lat,
+                "lon": self.observer.lon,
+                "alt_m": self.observer.alt_m,
+            },
+            "day_start": self.day_start.to_rfc3339(),
+            "tracks": tracks,
+        })
+    }
 }
 
 #[cfg(test)]

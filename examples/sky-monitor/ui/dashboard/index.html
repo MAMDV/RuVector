@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RuView SkyGraph — all-sky dashboard (ADR-199)</title>
+<style>
+  :root {
+    --bg: #07090f;
+    --panel: #0d1220;
+    --panel-edge: #1b2440;
+    --ink: #c7d2e8;
+    --ink-dim: #6b7896;
+    --accent: #5aa9ff;
+    --normal: #3ddc84;
+    --mild: #e8d44d;
+    --interesting: #ff9f43;
+    --strong: #ff5252;
+    --rare: #d05aff;
+    --baseline: #5a6378;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: radial-gradient(ellipse at 50% -20%, #101a33 0%, var(--bg) 60%);
+    color: var(--ink);
+    font: 13px/1.45 "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 16px 6px;
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; color: #e8eefc; font-weight: 600; }
+  header .sub { color: var(--ink-dim); font-size: 11.5px; }
+  #engine { color: var(--accent); font-size: 11.5px; margin-left: auto; }
+  main { flex: 1; display: flex; gap: 12px; padding: 0 12px 8px; min-height: 0; }
+  #sky-wrap { flex: 1 1 62%; position: relative; min-width: 0; }
+  canvas { width: 100%; height: 100%; display: block; border-radius: 10px;
+           background: radial-gradient(circle at 50% 50%, #0b1226 0%, #060812 78%);
+           border: 1px solid var(--panel-edge); }
+  aside {
+    flex: 0 0 360px; max-width: 40%; overflow-y: auto;
+    background: var(--panel); border: 1px solid var(--panel-edge);
+    border-radius: 10px; padding: 10px 12px;
+  }
+  aside h2 { font-size: 12px; margin: 6px 0 6px; color: var(--ink-dim);
+             text-transform: uppercase; letter-spacing: 0.08em; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: var(--ink-dim); font-weight: 500; padding: 2px 6px; }
+  td { padding: 3px 6px; border-top: 1px solid #141c33; white-space: nowrap; }
+  tr.track-row { cursor: pointer; }
+  tr.track-row:hover { background: #131b31; }
+  tr.track-row.active td { background: #16203c; }
+  tr.track-row.live td:first-child { color: #e8eefc; }
+  .badge {
+    display: inline-block; padding: 1px 7px; border-radius: 8px;
+    font-size: 10.5px; color: #04060c; font-weight: 600;
+  }
+  #reasons { margin: 4px 0 8px; }
+  #reasons .reason { color: var(--ink); padding: 4px 6px; margin: 4px 0;
+    background: #121a30; border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; }
+  #reasons .who { color: var(--ink-dim); margin-bottom: 2px; }
+  footer {
+    display: flex; align-items: center; gap: 12px; padding: 8px 16px 12px;
+  }
+  footer button {
+    background: #16203c; color: var(--ink); border: 1px solid var(--panel-edge);
+    border-radius: 6px; padding: 4px 14px; font: inherit; cursor: pointer;
+  }
+  footer button:hover { border-color: var(--accent); color: #e8eefc; }
+  #scrubber { flex: 1; accent-color: var(--accent); }
+  #clock { min-width: 170px; color: #e8eefc; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>RuView SkyGraph — all-sky view</h1>
+    <span class="sub" id="observer-label">observer: —</span>
+    <span id="engine">projection: JS (loading…)</span>
+  </header>
+  <main>
+    <div id="sky-wrap"><canvas id="sky"></canvas></div>
+    <aside>
+      <h2>Anomaly reasons</h2>
+      <div id="reasons"><div class="reason">Select a track below.</div></div>
+      <h2>Tracks</h2>
+      <table id="track-table">
+        <thead>
+          <tr><th>call / icao24</th><th>alt m</th><th>hdg</th><th>band</th><th>score</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </aside>
+  </main>
+  <footer>
+    <button id="play">Play</button>
+    <input id="scrubber" type="range" min="0" max="1000" value="0">
+    <span id="clock">—</span>
+  </footer>
+  <script src="./sky-demo-data.js"></script>
+  <script type="module" src="./sky.js"></script>
+</body>
+</html>

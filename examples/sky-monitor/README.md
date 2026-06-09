@@ -36,12 +36,67 @@ the door open for real RTL-SDR data. Vectors live in
 # demo (from the repository root)
 cargo run -p sky-monitor --release
 
+# demo + dashboard data export (writes `const SKY_DATA = {...};` for .js paths)
+cargo run -p sky-monitor --release -- --emit-json examples/sky-monitor/ui/dashboard/sky-demo-data.js
+
 # acceptance + unit tests (mapped to ADR-199 §31 / §22)
 cargo test -p sky-monitor
 
 # criterion benches (projection, embedding, VectorDB, anomaly, end-to-end)
 cargo bench -p sky-monitor            # full run
 cargo bench -p sky-monitor -- --test  # smoke mode
+```
+
+## Feature flags
+
+| Feature | Default | Contents |
+|---------|---------|----------|
+| `appliance` | **yes** | The heavy native stores — `ruvector-core` (VectorDB) and `ruvector-graph` (GraphDB) — and the modules built on them: `indexer`, `skygraph`, `pipeline`, plus the demo binary, the acceptance tests, and the benches |
+| *(none)* | — | `--no-default-features` leaves the pure subset: `config`, `coords`, `observation`, `adsb`, `track`, `weather`, `embedding`, `anomaly`, `brief` — this compiles for `wasm32-unknown-unknown` and is what `sky-monitor-wasm` builds on |
+
+```bash
+# verify the wasm-compatible subset
+cargo build -p sky-monitor --no-default-features --target wasm32-unknown-unknown
+```
+
+## WASM projection engine (`wasm/` → `sky-monitor-wasm`)
+
+Browser-facing bindings for the ADR-199 presentation plane ("dashboard
+first"), wrapping the pure subset with `wasm-bindgen`:
+
+* `SkyProjector` — §10 WGS-84 → az/el/range/bearing projection, single
+  (`project`) and batched (`project_batch`, `Float64Array` of `[lat,lon,alt]`
+  triplets → `[az,el,range,bearing]` quadruplets for fast trail rendering),
+  plus `screen_position` — the polar "fisheye" all-sky mapping (zenith at the
+  canvas centre, horizon at the edge, azimuth 0° = North = up).
+* `AnomalyScorer` — `baseline_from(tracksJson)` + `score(trackJson, novelty)`
+  over track summaries (`{icao24, callsign, mean_alt_m, dominant_heading_deg,
+  start_hour, mean_signal_dbfs, min_range_m, max_elevation_deg}`), reusing the
+  exact core §15 scorer (`anomaly::BaselineStats::from_summaries` /
+  `anomaly::score_summary`) so browser scores match the native pipeline.
+* `parse_dump1090_json` — the core dump1090 parser for live feeds, and
+  `band_for(score)` / `version()` helpers.
+
+```bash
+cargo test -p sky-monitor-wasm                                      # native unit tests (screen mapping)
+cargo build -p sky-monitor-wasm --target wasm32-unknown-unknown --release
+wasm-pack build examples/sky-monitor/wasm --target web --out-dir ../ui/dashboard/pkg  # for the dashboard
+```
+
+## Canvas dashboard (`ui/dashboard/`)
+
+Vanilla JS + Canvas, no build tooling (see `ui/dashboard/README.md`): an
+all-sky polar plot (elevation rings at 0/30/60°, compass labels) showing
+aircraft as labelled dots with fading trails, overhead-candidate highlight
+rings, anomaly badges colored by band, a side panel with the live track table
+and §15 anomaly reasons, and a replay scrubber over the embedded deterministic
+scenario (`sky-demo-data.js`, regenerated via `--emit-json` above).
+Projection runs in JS by default and switches to `sky-monitor-wasm`
+automatically when the wasm-pack output is present at `ui/dashboard/pkg/`.
+
+```bash
+cd examples/sky-monitor/ui/dashboard && python3 -m http.server 8000
+# open http://localhost:8000/
 ```
 
 ## Sample output (trimmed)
@@ -110,6 +165,6 @@ scored against strictly prior tracks (ADR §26: baseline before alerting).
 ## What is deliberately out of scope here
 
 Phase 5 sensors (audio/RF/camera — `cross_sensor_confirmation` is a documented
-placeholder at 0), live dump1090/OpenSky ingestion, the WASM projection engine
-and Canvas dashboard (separate `examples/sky-monitor/wasm` work), retention /
-hash-chained raw archive, and the NL assistant service.
+placeholder at 0), live dump1090/OpenSky ingestion (the parser and the
+browser-side `parse_dump1090_json` exist, but nothing polls a receiver),
+retention / hash-chained raw archive, and the NL assistant service.

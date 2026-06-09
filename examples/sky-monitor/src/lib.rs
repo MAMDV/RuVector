@@ -29,22 +29,31 @@ pub mod brief;
 pub mod config;
 pub mod coords;
 pub mod embedding;
+#[cfg(feature = "appliance")]
 pub mod indexer;
 pub mod observation;
+#[cfg(feature = "appliance")]
 pub mod pipeline;
+#[cfg(feature = "appliance")]
 pub mod skygraph;
 pub mod track;
 pub mod weather;
 
 pub use adsb::{parse_dump1090, AircraftState, ANOMALOUS_ICAO24, GA_OVERHEAD_ICAO24};
-pub use anomaly::{AnomalyComponents, AnomalyReport, BaselineStats, Interpretation};
+pub use anomaly::{
+    score_summary, score_track, AnomalyComponents, AnomalyReport, BaselineStats, Interpretation,
+    TrackSummary,
+};
 pub use brief::DailySkyBrief;
 pub use config::{AnomalyConfig, ObserverConfig};
 pub use coords::{geodetic_to_ecef, observer_frame, Ecef, Enu, ObserverFrame};
 pub use embedding::{track_embedding, weather_window_embedding, TRACK_EMBEDDING_DIM};
+#[cfg(feature = "appliance")]
 pub use indexer::TrackIndexer;
 pub use observation::{EntityType, GeoPosition, Motion, Observation};
+#[cfg(feature = "appliance")]
 pub use pipeline::{Pipeline, PipelineReport};
+#[cfg(feature = "appliance")]
 pub use skygraph::{SkyGraph, TrackExplanation};
 pub use track::{stitch_tracks, Track, TrackPoint};
 pub use weather::{WeatherCondition, WeatherWindow};
@@ -54,9 +63,11 @@ pub use weather::{WeatherCondition, WeatherWindow};
 #[derive(Debug, thiserror::Error)]
 pub enum SkyError {
     /// Error from the `ruvector-core` vector database.
+    #[cfg(feature = "appliance")]
     #[error("vector store error: {0}")]
     Vector(#[from] ruvector_core::RuvectorError),
     /// Error from the `ruvector-graph` graph database.
+    #[cfg(feature = "appliance")]
     #[error("graph store error: {0}")]
     Graph(#[from] ruvector_graph::GraphError),
     /// JSON decode error (e.g. malformed dump1090 payload).

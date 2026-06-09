@@ -173,6 +173,8 @@ members = [
     "examples/train-discoveries",
     # RuView SkyGraph appliance core (ADR-199 Phases 1-4, synthetic ADS-B)
     "examples/sky-monitor",
+    # Browser-facing WASM projection engine for the SkyGraph dashboard (ADR-199 presentation plane)
+    "examples/sky-monitor/wasm",
     # Spectral graph sparsification
     "crates/ruvector-sparsifier",
     "crates/ruvector-sparsifier-wasm",

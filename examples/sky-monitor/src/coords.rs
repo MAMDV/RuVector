@@ -120,22 +120,58 @@ pub fn observer_frame(
     target_lon: f64,
     target_alt_m: f64,
 ) -> ObserverFrame {
-    let obs_ecef = geodetic_to_ecef(obs_lat, obs_lon, obs_alt_m);
-    let tgt_ecef = geodetic_to_ecef(target_lat, target_lon, target_alt_m);
-    let enu = ecef_to_enu(obs_lat, obs_lon, obs_ecef, tgt_ecef);
-    let horizontal = enu.east.hypot(enu.north);
-    let range_m = (horizontal * horizontal + enu.up * enu.up).sqrt();
+    // Same math as `geodetic_to_ecef` → `ecef_to_enu` → `initial_bearing_deg`,
+    // inlined so each sin/cos is computed exactly once (the helper composition
+    // recomputes the observer trig three times and the target trig twice).
+    let lat1 = obs_lat.to_radians();
+    let lon1 = obs_lon.to_radians();
+    let lat2 = target_lat.to_radians();
+    let lon2 = target_lon.to_radians();
+    let (sin_lat1, cos_lat1) = lat1.sin_cos();
+    let (sin_lon1, cos_lon1) = lon1.sin_cos();
+    let (sin_lat2, cos_lat2) = lat2.sin_cos();
+    let (sin_lon2, cos_lon2) = lon2.sin_cos();
+
+    // Geodetic → ECEF for observer and target (WGS-84).
+    let n1 = WGS84_A / (1.0 - WGS84_E2 * sin_lat1 * sin_lat1).sqrt();
+    let ox = (n1 + obs_alt_m) * cos_lat1 * cos_lon1;
+    let oy = (n1 + obs_alt_m) * cos_lat1 * sin_lon1;
+    let oz = (n1 * (1.0 - WGS84_E2) + obs_alt_m) * sin_lat1;
+    let n2 = WGS84_A / (1.0 - WGS84_E2 * sin_lat2 * sin_lat2).sqrt();
+    let tx = (n2 + target_alt_m) * cos_lat2 * cos_lon2;
+    let ty = (n2 + target_alt_m) * cos_lat2 * sin_lon2;
+    let tz = (n2 * (1.0 - WGS84_E2) + target_alt_m) * sin_lat2;
+
+    // ECEF Δ → ENU at the observer.
+    let dx = tx - ox;
+    let dy = ty - oy;
+    let dz = tz - oz;
+    let east = -sin_lon1 * dx + cos_lon1 * dy;
+    let north = -sin_lat1 * cos_lon1 * dx - sin_lat1 * sin_lon1 * dy + cos_lat1 * dz;
+    let up = cos_lat1 * cos_lon1 * dx + cos_lat1 * sin_lon1 * dy + sin_lat1 * dz;
+
+    let horizontal = east.hypot(north);
+    let range_m = (horizontal * horizontal + up * up).sqrt();
     let azimuth_deg = if horizontal < 1e-9 {
         0.0 // directly overhead/underfoot: azimuth undefined, report 0
     } else {
-        normalize_deg(enu.east.atan2(enu.north).to_degrees())
+        normalize_deg(east.atan2(north).to_degrees())
     };
-    let elevation_deg = enu.up.atan2(horizontal).to_degrees();
+    let elevation_deg = up.atan2(horizontal).to_degrees();
+
+    // Great-circle initial bearing, reusing the trig above via the angle
+    // subtraction identities (sin/cos of Δλ from the per-longitude values).
+    let sin_dl = sin_lon2 * cos_lon1 - cos_lon2 * sin_lon1;
+    let cos_dl = cos_lon2 * cos_lon1 + sin_lon2 * sin_lon1;
+    let by = sin_dl * cos_lat2;
+    let bx = cos_lat1 * sin_lat2 - sin_lat1 * cos_lat2 * cos_dl;
+    let bearing_deg = normalize_deg(by.atan2(bx).to_degrees());
+
     ObserverFrame {
         range_m,
         azimuth_deg,
         elevation_deg,
-        bearing_deg: initial_bearing_deg(obs_lat, obs_lon, target_lat, target_lon),
+        bearing_deg,
     }
 }
 

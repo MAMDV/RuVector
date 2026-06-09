@@ -51,15 +51,76 @@ fn clamp01(v: f64) -> f32 {
 /// Fully deterministic in the track contents.
 pub fn track_embedding(track: &Track) -> Vec<f32> {
     let mut e = vec![0.0f32; TRACK_EMBEDDING_DIM];
-    let alts: Vec<f64> = track.points.iter().map(|p| p.alt_m).collect();
-    let min_alt = alts.iter().copied().fold(f64::INFINITY, f64::min);
-    let max_alt = alts.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    e[0] = clamp01(track.mean_altitude_m() / 12_000.0);
+    // Single pass over the points: accumulate every per-point statistic at
+    // once instead of one full iteration per feature (the Track stat methods
+    // would walk the point list ~14 times and allocate a temp Vec).
+    let pts = &track.points;
+    let count = pts.len();
+    let nf = count as f64;
+    let mut alt_sum = 0.0f64;
+    let mut alt_sq = 0.0f64;
+    let mut min_alt = f64::INFINITY;
+    let mut max_alt = f64::NEG_INFINITY;
+    let mut speed_sum = 0.0f64;
+    let mut speed_sq = 0.0f64;
+    let mut sig_sum = 0.0f64;
+    let mut elev_sum = 0.0f64;
+    let mut vr_abs_sum = 0.0f64;
+    let mut climb = 0usize;
+    let mut descent = 0usize;
+    let mut head_s = 0.0f64;
+    let mut head_c = 0.0f64;
+    let mut buckets = [0u32; 8];
+    let mut path_m = 0.0f64;
+    let mut prev_lat = 0.0f64;
+    let mut prev_lon = 0.0f64;
+    for (i, p) in pts.iter().enumerate() {
+        alt_sum += p.alt_m;
+        alt_sq += p.alt_m * p.alt_m;
+        min_alt = min_alt.min(p.alt_m);
+        max_alt = max_alt.max(p.alt_m);
+        speed_sum += p.speed_mps;
+        speed_sq += p.speed_mps * p.speed_mps;
+        sig_sum += p.signal_dbfs;
+        elev_sum += p.frame.elevation_deg;
+        vr_abs_sum += p.vertical_rate_mps.abs();
+        if p.vertical_rate_mps > 2.0 {
+            climb += 1;
+        }
+        if p.vertical_rate_mps < -2.0 {
+            descent += 1;
+        }
+        let r = p.track_deg.to_radians();
+        head_s += r.sin();
+        head_c += r.cos();
+        let b = ((p.frame.azimuth_deg.rem_euclid(360.0)) / 45.0) as usize % 8;
+        buckets[b] += 1;
+        if i > 0 {
+            // Equirectangular step, identical to Track::path_length_m.
+            let dy = (p.lat - prev_lat) * 111_132.0;
+            let dx = (p.lon - prev_lon) * 111_320.0 * ((prev_lat + p.lat) / 2.0).to_radians().cos();
+            path_m += dx.hypot(dy);
+        }
+        prev_lat = p.lat;
+        prev_lon = p.lon;
+    }
+    let mean = |sum: f64| if count == 0 { 0.0 } else { sum / nf };
+    let std = |sq: f64, sum: f64| {
+        if count == 0 {
+            0.0
+        } else {
+            let m = sum / nf;
+            (sq / nf - m * m).max(0.0).sqrt()
+        }
+    };
+
+    e[0] = clamp01(mean(alt_sum) / 12_000.0);
     e[1] = clamp01(min_alt / 12_000.0);
     e[2] = clamp01(max_alt / 12_000.0);
-    e[3] = clamp01(track.mean_speed_mps() / 300.0);
+    e[3] = clamp01(mean(speed_sum) / 300.0);
 
-    let h = track.dominant_heading_deg().to_radians();
+    // Circular-mean ground track, as Track::dominant_heading_deg.
+    let h = crate::coords::normalize_deg(head_s.atan2(head_c).to_degrees()).to_radians();
     e[4] = ((h.sin() + 1.0) / 2.0) as f32;
     e[5] = ((h.cos() + 1.0) / 2.0) as f32;
 
@@ -72,27 +133,35 @@ pub fn track_embedding(track: &Track) -> Vec<f32> {
 
     e[8] = clamp01(track.min_range_m / 50_000.0);
     e[9] = clamp01(track.max_elevation_deg / 90.0);
-    e[10] = clamp01(track.mean_elevation_deg() / 90.0);
+    e[10] = clamp01(mean(elev_sum) / 90.0);
     e[11] = clamp01(track.duration_secs() / 1_800.0);
-    e[12] = clamp01(track.climb_ratio());
-    e[13] = clamp01(track.descent_ratio());
-    e[14] = clamp01(track.straightness());
-    e[15] = clamp01(track.mean_abs_vertical_rate_mps() / 15.0);
+    e[12] = clamp01(if count == 0 { 0.0 } else { climb as f64 / nf });
+    e[13] = clamp01(if count == 0 { 0.0 } else { descent as f64 / nf });
+    // Net displacement / path length, as Track::straightness.
+    let straightness = if path_m < 1.0 {
+        1.0
+    } else {
+        let (a, b) = (pts.first().unwrap(), pts.last().unwrap());
+        let dy = (b.lat - a.lat) * 111_132.0;
+        let dx = (b.lon - a.lon) * 111_320.0 * ((a.lat + b.lat) / 2.0).to_radians().cos();
+        (dx.hypot(dy) / path_m).clamp(0.0, 1.0)
+    };
+    e[14] = clamp01(straightness);
+    e[15] = clamp01(mean(vr_abs_sum) / 15.0);
 
     // Coarse azimuth occupancy: fraction of samples seen in each 45° sky
     // sector around the observer (route-class signature).
-    let n = track.points.len().max(1) as f64;
-    for p in &track.points {
-        let b = ((p.frame.azimuth_deg.rem_euclid(360.0)) / 45.0) as usize % 8;
-        e[16 + b] += (1.0 / n) as f32;
+    let n = count.max(1) as f64;
+    for (b, &hits) in buckets.iter().enumerate() {
+        e[16 + b] = (f64::from(hits) / n) as f32;
     }
 
-    e[24] = clamp01((track.mean_signal_dbfs() + 40.0) / 40.0);
-    e[25] = clamp01(track.speed_std_mps() / 50.0);
-    e[26] = clamp01(track.altitude_std_m() / 3_000.0);
-    e[27] = clamp01(track.points.first().map(|p| p.frame.range_m).unwrap_or(0.0) / 50_000.0);
-    e[28] = clamp01(track.points.last().map(|p| p.frame.range_m).unwrap_or(0.0) / 50_000.0);
-    e[29] = clamp01(track.points.len() as f64 / 600.0);
+    e[24] = clamp01((mean(sig_sum) + 40.0) / 40.0);
+    e[25] = clamp01(std(speed_sq, speed_sum) / 50.0);
+    e[26] = clamp01(std(alt_sq, alt_sum) / 3_000.0);
+    e[27] = clamp01(pts.first().map(|p| p.frame.range_m).unwrap_or(0.0) / 50_000.0);
+    e[28] = clamp01(pts.last().map(|p| p.frame.range_m).unwrap_or(0.0) / 50_000.0);
+    e[29] = clamp01(count as f64 / 600.0);
     e[30] = if track.is_overhead_candidate { 1.0 } else { 0.0 };
     e[31] = 0.0; // reserved
     e
