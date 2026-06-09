@@ -171,6 +171,8 @@ members = [
     "examples/a2a-swarm",
     # ETL pipeline example
     "examples/train-discoveries",
+    # RuView SkyGraph appliance core (ADR-199 Phases 1-4, synthetic ADS-B)
+    "examples/sky-monitor",
     # Spectral graph sparsification
     "crates/ruvector-sparsifier",
     "crates/ruvector-sparsifier-wasm",

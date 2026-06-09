@@ -1,0 +1,33 @@
+[package]
+name = "sky-monitor"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "RuView SkyGraph Appliance core (ADR-199 Phases 1-4): synthetic ADS-B -> observer-relative sky coordinates -> track stitching -> SkyGraph -> embeddings -> anomaly scoring -> daily sky brief"
+
+[dependencies]
+# Vector memory (ADR-199 §13). default-features off: no on-disk storage / HTTP
+# embedding clients are needed here — the in-memory backend keeps the demo
+# hermetic. `simd` + `parallel` match what ruvector-graph already requires.
+ruvector-core = { path = "../../crates/ruvector-core", default-features = false, features = ["simd", "parallel"] }
+# SkyGraph storage (ADR-199 §12): property-graph nodes/edges with label and
+# property indexes. Default features (in-memory GraphDB::new is used; the redb
+# storage backend stays unused).
+ruvector-graph = { path = "../../crates/ruvector-graph" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[lib]
+bench = false
+
+[[bench]]
+name = "sky_bench"
+harness = false
