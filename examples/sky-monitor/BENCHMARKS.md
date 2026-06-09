@@ -84,6 +84,22 @@ scoring bands, graph queries) and 5 native tests in `sky-monitor-wasm`
 (polar screen mapping). Full suite: **32/32 green**, `clippy` clean for
 both crates, `wasm32-unknown-unknown` builds clean (debug + release).
 
+## WASM functional verification
+
+`wasm-pack build --target web` produces a 150 KB `sky_monitor_wasm_bg.wasm`
+(with `wasm-opt = false`; smaller with binaryen available). The module was
+exercised end-to-end in Node against a `--target nodejs` build:
+
+- projection: observer at Oakville, target 10 km due north at 1,000 m →
+  azimuth 0.00°, elevation 5.10°, range 10,029 m (matches native `coords`)
+- screen mapping: zenith → canvas center, below-horizon invisible
+- `project_batch`: `[lat,lon,alt]×N → [az,el,range,bearing]×N` shape verified
+- anomaly parity: with an 8-track corridor baseline, the low off-corridor
+  night track scores **0.900 (strong anomaly)** with cited reasons while a
+  corridor flight scores 0.055 (normal) — identical code path to the native
+  scorer via `TrackSummary`
+- `parse_dump1090_json` parses a live-format `aircraft.json` payload
+
 ## Recommendations not applied (file-ownership / scope)
 
 - `pipeline.rs` re-stitches tracks once per baseline pass; caching the

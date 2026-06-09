@@ -19,3 +19,10 @@ js-sys = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde-wasm-bindgen = "0.6"
+
+# wasm-opt is a size optimization only; skip it so `wasm-pack build` works
+# in offline/air-gapped environments (the appliance target) where the
+# binaryen download is unavailable. Run wasm-opt manually if size matters.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
