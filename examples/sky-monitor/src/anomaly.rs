@@ -232,7 +232,14 @@ pub fn score_track(
     novelty: f64,
     cross_sensor: f64,
 ) -> AnomalyReport {
-    score_summary_as(cfg, &track.track_id, &TrackSummary::from(track), baseline, novelty, cross_sensor)
+    score_summary_as(
+        cfg,
+        &track.track_id,
+        &TrackSummary::from(track),
+        baseline,
+        novelty,
+        cross_sensor,
+    )
 }
 
 /// Score a [`TrackSummary`] against the baseline — same formula, reasons, and
@@ -270,7 +277,8 @@ fn score_summary_as(
         0.5 // no baseline corridors yet
     };
 
-    let alt_z = (track.mean_alt_m - baseline.altitude_mean_m).abs() / baseline.altitude_std_m.max(1.0);
+    let alt_z =
+        (track.mean_alt_m - baseline.altitude_mean_m).abs() / baseline.altitude_std_m.max(1.0);
     let altitude_deviation = (alt_z / Z_SQUASH).min(1.0);
 
     // Rarity of the start hour: how many prior tracks started within ±2 h
@@ -282,7 +290,8 @@ fn score_summary_as(
     }
     let time_of_day_rarity = (1.0 - f64::from(window_count) / HOUR_SATURATION).max(0.0);
 
-    let sig_z = (track.mean_signal_dbfs - baseline.signal_mean_dbfs).abs() / baseline.signal_std_dbfs;
+    let sig_z =
+        (track.mean_signal_dbfs - baseline.signal_mean_dbfs).abs() / baseline.signal_std_dbfs;
     let signal_unusualness = (sig_z / Z_SQUASH).min(1.0);
 
     let components = AnomalyComponents {

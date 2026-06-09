@@ -133,8 +133,7 @@ impl AnomalyScorer {
     /// (vector novelty from the native indexer, or 0 when unavailable).
     /// Returns `{score, band, reasons}`.
     pub fn score(&self, track_json: JsValue, novelty: f64) -> Result<JsValue, JsValue> {
-        let summary: TrackSummary =
-            serde_wasm_bindgen::from_value(track_json).map_err(js_err)?;
+        let summary: TrackSummary = serde_wasm_bindgen::from_value(track_json).map_err(js_err)?;
         // No second sensor modality in the browser: cross_sensor = 0.
         let report = score_summary(&self.cfg, &summary, &self.baseline, novelty, 0.0);
         serde_wasm_bindgen::to_value(&ScoreResult {

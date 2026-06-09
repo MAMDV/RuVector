@@ -53,7 +53,12 @@ pub struct Track {
 }
 
 impl Track {
-    fn from_points(icao24: String, callsign: String, segment: usize, points: Vec<TrackPoint>) -> Self {
+    fn from_points(
+        icao24: String,
+        callsign: String,
+        segment: usize,
+        points: Vec<TrackPoint>,
+    ) -> Self {
         let started = points.first().map(|p| p.ts).unwrap_or_else(Utc::now);
         let ended = points.last().map(|p| p.ts).unwrap_or(started);
         let closest = points
@@ -229,7 +234,11 @@ fn flat_distance_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 /// Stitch aircraft observations into tracks: group by `entity_id` (icao24),
 /// order by time, and split whenever consecutive samples are more than
 /// `gap_secs` apart. Non-aircraft observations are ignored.
-pub fn stitch_tracks(_observer: &ObserverConfig, observations: &[Observation], gap_secs: i64) -> Vec<Track> {
+pub fn stitch_tracks(
+    _observer: &ObserverConfig,
+    observations: &[Observation],
+    gap_secs: i64,
+) -> Vec<Track> {
     let mut by_aircraft: BTreeMap<String, Vec<&Observation>> = BTreeMap::new();
     for o in observations {
         if o.entity_type == EntityType::Aircraft {
@@ -246,7 +255,12 @@ pub fn stitch_tracks(_observer: &ObserverConfig, observations: &[Observation], g
         for o in group {
             if let (Some(prev), true) = (last_ts, !segment.is_empty()) {
                 if (o.timestamp_utc - prev).num_seconds() > gap_secs {
-                    tracks.push(Track::from_points(icao24.clone(), callsign.clone(), seg_no, std::mem::take(&mut segment)));
+                    tracks.push(Track::from_points(
+                        icao24.clone(),
+                        callsign.clone(),
+                        seg_no,
+                        std::mem::take(&mut segment),
+                    ));
                     seg_no += 1;
                 }
             }
@@ -292,8 +306,16 @@ mod tests {
                     EntityType::Aircraft,
                     s.icao24.clone(),
                     s.ts,
-                    GeoPosition { lat: s.lat, lon: s.lon, alt_m: s.alt_m },
-                    Motion { speed_mps: s.speed_mps, track_deg: s.track_deg, vertical_rate_mps: s.vertical_rate_mps },
+                    GeoPosition {
+                        lat: s.lat,
+                        lon: s.lon,
+                        alt_m: s.alt_m,
+                    },
+                    Motion {
+                        speed_mps: s.speed_mps,
+                        track_deg: s.track_deg,
+                        vertical_rate_mps: s.vertical_rate_mps,
+                    },
                     serde_json::json!({ "callsign": s.callsign, "signal_dbfs": s.signal_dbfs }),
                     0.95,
                 )
@@ -307,12 +329,18 @@ mod tests {
         let tracks = stitch_tracks(&cfg, &observations(), TRACK_GAP_SECS);
         assert_eq!(tracks.len(), 10, "10 flights → 10 tracks");
         assert!(tracks.windows(2).all(|w| w[0].started <= w[1].started));
-        let ga = tracks.iter().find(|t| t.icao24 == crate::adsb::GA_OVERHEAD_ICAO24).unwrap();
+        let ga = tracks
+            .iter()
+            .find(|t| t.icao24 == crate::adsb::GA_OVERHEAD_ICAO24)
+            .unwrap();
         assert!(ga.is_overhead_candidate, "GA pass must satisfy ADR rule 1");
         assert!((ga.dominant_heading_deg() - 88.0).abs() < 3.0);
         assert!(ga.straightness() > 0.95);
         let corridor = tracks.iter().find(|t| t.icao24 == "c01a01").unwrap();
-        assert!(!corridor.is_overhead_candidate, "en-route corridor is > 10 km slant range");
+        assert!(
+            !corridor.is_overhead_candidate,
+            "en-route corridor is > 10 km slant range"
+        );
         assert!(corridor.mean_altitude_m() > 10_000.0);
     }
 }

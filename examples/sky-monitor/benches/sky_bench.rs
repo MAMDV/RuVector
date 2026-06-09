@@ -29,7 +29,11 @@ fn bench_projection(c: &mut Criterion) {
     let targets: Vec<(f64, f64, f64)> = (0..10_000)
         .map(|i| {
             let t = i as f64;
-            (43.0 + (t * 0.731).fract(), -80.5 + (t * 0.377).fract() * 2.0, 500.0 + (t * 13.7) % 11_000.0)
+            (
+                43.0 + (t * 0.731).fract(),
+                -80.5 + (t * 0.377).fract() * 2.0,
+                500.0 + (t * 13.7) % 11_000.0,
+            )
         })
         .collect();
     let mut g = c.benchmark_group("coords/observer_frame_batch");
@@ -38,7 +42,9 @@ fn bench_projection(c: &mut Criterion) {
         b.iter(|| {
             targets
                 .iter()
-                .map(|(la, lo, al)| observer_frame(cfg.lat, cfg.lon, cfg.alt_m, *la, *lo, *al).range_m)
+                .map(|(la, lo, al)| {
+                    observer_frame(cfg.lat, cfg.lon, cfg.alt_m, *la, *lo, *al).range_m
+                })
                 .sum::<f64>()
         })
     });
@@ -73,7 +79,8 @@ fn bench_vector_db(c: &mut Criterion) {
                 t.track_id = format!("bench-{i}");
                 idx.insert_track(&t, e.clone()).unwrap();
             }
-            idx.similar_tracks(black_box(&embeddings[0]), None, 10).unwrap()
+            idx.similar_tracks(black_box(&embeddings[0]), None, 10)
+                .unwrap()
         })
     });
 }

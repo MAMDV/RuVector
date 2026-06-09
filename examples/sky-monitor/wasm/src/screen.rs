@@ -63,11 +63,20 @@ mod tests {
     #[test]
     fn horizon_east_south_west_map_to_compass_points() {
         let (x, y, _) = polar_screen_xy(90.0, 0.0, W, H); // East → right
-        assert!((x - (400.0 + R)).abs() < 1e-6 && (y - 300.0).abs() < 1e-6, "E ({x},{y})");
+        assert!(
+            (x - (400.0 + R)).abs() < 1e-6 && (y - 300.0).abs() < 1e-6,
+            "E ({x},{y})"
+        );
         let (x, y, _) = polar_screen_xy(180.0, 0.0, W, H); // South → down
-        assert!((x - 400.0).abs() < 1e-6 && (y - (300.0 + R)).abs() < 1e-6, "S ({x},{y})");
+        assert!(
+            (x - 400.0).abs() < 1e-6 && (y - (300.0 + R)).abs() < 1e-6,
+            "S ({x},{y})"
+        );
         let (x, y, _) = polar_screen_xy(270.0, 0.0, W, H); // West → left
-        assert!((x - (400.0 - R)).abs() < 1e-6 && (y - 300.0).abs() < 1e-6, "W ({x},{y})");
+        assert!(
+            (x - (400.0 - R)).abs() < 1e-6 && (y - 300.0).abs() < 1e-6,
+            "W ({x},{y})"
+        );
     }
 
     #[test]
@@ -84,7 +93,10 @@ mod tests {
         let (x, y, visible) = polar_screen_xy(90.0, -10.0, W, H);
         assert!(!visible);
         let r = ((x - 400.0).powi(2) + (y - 300.0).powi(2)).sqrt();
-        assert!(r > R, "below-horizon point must land outside the disc, r {r}");
+        assert!(
+            r > R,
+            "below-horizon point must land outside the disc, r {r}"
+        );
         // Clamp: el −90 stays finite (2R).
         let (x, y, visible) = polar_screen_xy(0.0, -90.0, W, H);
         assert!(!visible && x.is_finite() && y.is_finite());

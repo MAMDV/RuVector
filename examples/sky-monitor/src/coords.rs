@@ -186,8 +186,16 @@ mod tests {
         // ~50 km due north at the same ellipsoidal altitude.
         let dlat = 50_000.0 / 111_132.0; // metres per degree latitude (approx.)
         let f = observer_frame(OBS.0, OBS.1, OBS.2, OBS.0 + dlat, OBS.1, OBS.2);
-        let az = if f.azimuth_deg > 180.0 { f.azimuth_deg - 360.0 } else { f.azimuth_deg };
-        assert!(az.abs() < 0.5, "azimuth should be ~0 deg, got {}", f.azimuth_deg);
+        let az = if f.azimuth_deg > 180.0 {
+            f.azimuth_deg - 360.0
+        } else {
+            f.azimuth_deg
+        };
+        assert!(
+            az.abs() < 0.5,
+            "azimuth should be ~0 deg, got {}",
+            f.azimuth_deg
+        );
         // Earth curvature drops the target below the horizon: ~ -r/2R rad ≈ -0.22 deg.
         assert!(
             f.elevation_deg < 0.0 && f.elevation_deg > -0.5,
@@ -211,8 +219,16 @@ mod tests {
         let dlon = 20_000.0 / (111_320.0 * OBS.0.to_radians().cos());
         let f = observer_frame(OBS.0, OBS.1, OBS.2, OBS.0, OBS.1 + dlon, 10_000.0);
         assert!((f.azimuth_deg - 90.0).abs() < 1.0, "az {}", f.azimuth_deg);
-        assert!((f.elevation_deg - 26.3).abs() < 1.5, "el {}", f.elevation_deg);
-        assert!((f.bearing_deg - 90.0).abs() < 1.0, "bearing {}", f.bearing_deg);
+        assert!(
+            (f.elevation_deg - 26.3).abs() < 1.5,
+            "el {}",
+            f.elevation_deg
+        );
+        assert!(
+            (f.bearing_deg - 90.0).abs() < 1.0,
+            "bearing {}",
+            f.bearing_deg
+        );
     }
 
     #[test]

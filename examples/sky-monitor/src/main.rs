@@ -32,7 +32,11 @@ fn parse_args() -> sky_monitor::Result<Option<PathBuf>> {
 
 /// Write the dashboard export: plain JSON, or a `const SKY_DATA = ...;` JS
 /// module when the target file name ends in `.js`.
-fn emit_json(pipeline: &Pipeline, report: &sky_monitor::PipelineReport, path: &PathBuf) -> sky_monitor::Result<()> {
+fn emit_json(
+    pipeline: &Pipeline,
+    report: &sky_monitor::PipelineReport,
+    path: &PathBuf,
+) -> sky_monitor::Result<()> {
     let value = pipeline.demo_export_json(report);
     let body = if path.extension().is_some_and(|e| e == "js") {
         format!(
@@ -75,7 +79,11 @@ fn main() -> sky_monitor::Result<()> {
         println!(
             "{:<16} {:<7} {:>9.1} {:>7.0} {:>7.1} {:>8.0} {:>7.0} {:>9.0}  {}",
             t.track_id,
-            if t.callsign.is_empty() { "-" } else { &t.callsign },
+            if t.callsign.is_empty() {
+                "-"
+            } else {
+                &t.callsign
+            },
             t.min_range_m / 1000.0,
             f.azimuth_deg,
             f.elevation_deg,
@@ -90,7 +98,10 @@ fn main() -> sky_monitor::Result<()> {
     let (nodes, edges) = report.skygraph.stats();
     println!("\n== SkyGraph ==");
     println!("nodes: {nodes}   edges: {edges}");
-    println!("overhead candidates: {:?}", report.skygraph.overhead_candidates());
+    println!(
+        "overhead candidates: {:?}",
+        report.skygraph.overhead_candidates()
+    );
 
     // ---- Similarity --------------------------------------------------------
     println!("\n== Top similar-track pairs (RuVector, euclidean) ==");
@@ -100,12 +111,19 @@ fn main() -> sky_monitor::Result<()> {
 
     // ---- Anomalies ---------------------------------------------------------
     println!("\n== Anomaly scores (ADR-199 §15) ==");
-    println!("{:<16} {:<7} {:>6}  {:<16} reasons", "track", "call", "score", "band");
+    println!(
+        "{:<16} {:<7} {:>6}  {:<16} reasons",
+        "track", "call", "score", "band"
+    );
     for r in &report.reports {
         println!(
             "{:<16} {:<7} {:>6.3}  {:<16} {}",
             r.track_id,
-            if r.callsign.is_empty() { "-" } else { &r.callsign },
+            if r.callsign.is_empty() {
+                "-"
+            } else {
+                &r.callsign
+            },
             r.score,
             r.band.to_string(),
             r.reasons.join(" | ")
@@ -121,7 +139,9 @@ fn main() -> sky_monitor::Result<()> {
     {
         println!(
             "\n== Explain {} ({}, action: {}) ==",
-            worst.track_id, worst.band, worst.band.action()
+            worst.track_id,
+            worst.band,
+            worst.band.action()
         );
         if let Some(explanation) = report.skygraph.explain(&worst.track_id) {
             for line in &explanation.evidence {

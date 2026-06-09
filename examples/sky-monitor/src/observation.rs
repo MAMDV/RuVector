@@ -153,8 +153,16 @@ mod tests {
             EntityType::Aircraft,
             "c01a01",
             Utc.with_ymd_and_hms(2026, 6, 8, 19, 0, 0).unwrap(),
-            GeoPosition { lat: cfg.lat, lon: cfg.lon, alt_m: 1_200.0 },
-            Motion { speed_mps: 210.0, track_deg: 247.0, vertical_rate_mps: -3.1 },
+            GeoPosition {
+                lat: cfg.lat,
+                lon: cfg.lon,
+                alt_m: 1_200.0,
+            },
+            Motion {
+                speed_mps: 210.0,
+                track_deg: 247.0,
+                vertical_rate_mps: -3.1,
+            },
             serde_json::json!({ "callsign": "ACA123", "signal_dbfs": -18.4 }),
             0.92,
         );

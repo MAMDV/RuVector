@@ -162,7 +162,11 @@ pub fn track_embedding(track: &Track) -> Vec<f32> {
     e[27] = clamp01(pts.first().map(|p| p.frame.range_m).unwrap_or(0.0) / 50_000.0);
     e[28] = clamp01(pts.last().map(|p| p.frame.range_m).unwrap_or(0.0) / 50_000.0);
     e[29] = clamp01(count as f64 / 600.0);
-    e[30] = if track.is_overhead_candidate { 1.0 } else { 0.0 };
+    e[30] = if track.is_overhead_candidate {
+        1.0
+    } else {
+        0.0
+    };
     e[31] = 0.0; // reserved
     e
 }
@@ -212,8 +216,16 @@ mod tests {
                     EntityType::Aircraft,
                     s.icao24.clone(),
                     s.ts,
-                    GeoPosition { lat: s.lat, lon: s.lon, alt_m: s.alt_m },
-                    Motion { speed_mps: s.speed_mps, track_deg: s.track_deg, vertical_rate_mps: s.vertical_rate_mps },
+                    GeoPosition {
+                        lat: s.lat,
+                        lon: s.lon,
+                        alt_m: s.alt_m,
+                    },
+                    Motion {
+                        speed_mps: s.speed_mps,
+                        track_deg: s.track_deg,
+                        vertical_rate_mps: s.vertical_rate_mps,
+                    },
                     serde_json::json!({ "callsign": s.callsign, "signal_dbfs": s.signal_dbfs }),
                     0.95,
                 )
@@ -223,14 +235,20 @@ mod tests {
     }
 
     fn dist(a: &[f32], b: &[f32]) -> f32 {
-        a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt()
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y) * (x - y))
+            .sum::<f32>()
+            .sqrt()
     }
 
     #[test]
     fn embeddings_are_fixed_dim_and_separate_route_classes() {
         let ts = tracks();
-        let embs: Vec<(String, Vec<f32>)> =
-            ts.iter().map(|t| (t.icao24.clone(), track_embedding(t))).collect();
+        let embs: Vec<(String, Vec<f32>)> = ts
+            .iter()
+            .map(|t| (t.icao24.clone(), track_embedding(t)))
+            .collect();
         for (_, e) in &embs {
             assert_eq!(e.len(), TRACK_EMBEDDING_DIM);
             assert!(e.iter().all(|v| (0.0..=1.0001).contains(v)));

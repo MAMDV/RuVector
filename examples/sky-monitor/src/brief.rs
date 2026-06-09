@@ -52,7 +52,10 @@ impl DailySkyBrief {
         let aircraft: std::collections::BTreeSet<&str> =
             tracks.iter().map(|t| t.icao24.as_str()).collect();
         let overhead = tracks.iter().filter(|t| t.is_overhead_candidate).count();
-        let unusual = reports.iter().filter(|r| r.band > Interpretation::MildlyUnusual).count();
+        let unusual = reports
+            .iter()
+            .filter(|r| r.band > Interpretation::MildlyUnusual)
+            .count();
 
         let mut weather_events = Vec::new();
         let mut rain_run: Option<(usize, usize)> = None;

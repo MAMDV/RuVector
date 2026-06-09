@@ -52,26 +52,35 @@ impl Default for Pipeline {
 impl Pipeline {
     /// Phase 1: synthetic ADS-B samples → canonical observations (§11).
     pub fn observations(&self) -> Vec<Observation> {
-        generate_scenario(self.observer.lat, self.observer.lon, self.seed, self.day_start)
-            .iter()
-            .map(|s| {
-                Observation::new(
-                    &self.observer,
-                    "adsb_synthetic",
-                    EntityType::Aircraft,
-                    s.icao24.clone(),
-                    s.ts,
-                    GeoPosition { lat: s.lat, lon: s.lon, alt_m: s.alt_m },
-                    Motion {
-                        speed_mps: s.speed_mps,
-                        track_deg: s.track_deg,
-                        vertical_rate_mps: s.vertical_rate_mps,
-                    },
-                    serde_json::json!({ "callsign": s.callsign, "signal_dbfs": s.signal_dbfs }),
-                    0.95,
-                )
-            })
-            .collect()
+        generate_scenario(
+            self.observer.lat,
+            self.observer.lon,
+            self.seed,
+            self.day_start,
+        )
+        .iter()
+        .map(|s| {
+            Observation::new(
+                &self.observer,
+                "adsb_synthetic",
+                EntityType::Aircraft,
+                s.icao24.clone(),
+                s.ts,
+                GeoPosition {
+                    lat: s.lat,
+                    lon: s.lon,
+                    alt_m: s.alt_m,
+                },
+                Motion {
+                    speed_mps: s.speed_mps,
+                    track_deg: s.track_deg,
+                    vertical_rate_mps: s.vertical_rate_mps,
+                },
+                serde_json::json!({ "callsign": s.callsign, "signal_dbfs": s.signal_dbfs }),
+                0.95,
+            )
+        })
+        .collect()
     }
 
     /// Phases 1–3 shortcut used by tests/benches: stitched tracks (time
@@ -106,7 +115,13 @@ impl Pipeline {
                 // Phase 5 placeholder: no second sensor modality in the
                 // synthetic scenario, so no cross-sensor confirmation.
                 let cross_sensor = 0.0;
-                reports.push(score_track(&self.anomaly, track, &baseline, novelty, cross_sensor));
+                reports.push(score_track(
+                    &self.anomaly,
+                    track,
+                    &baseline,
+                    novelty,
+                    cross_sensor,
+                ));
                 nearest_baseline[i] = indexer
                     .similar_tracks(embedding, Some(&track.track_id), 1)?
                     .first()
@@ -118,7 +133,10 @@ impl Pipeline {
         // Cross-track similarity pairs (deduplicated, closest first).
         let mut similar_pairs: Vec<(String, String, f32)> = Vec::new();
         for (track, embedding) in tracks.iter().zip(&embeddings) {
-            if let Some((other, d)) = indexer.similar_tracks(embedding, Some(&track.track_id), 1)?.first() {
+            if let Some((other, d)) = indexer
+                .similar_tracks(embedding, Some(&track.track_id), 1)?
+                .first()
+            {
                 let (a, b) = if track.track_id < *other {
                     (track.track_id.clone(), other.clone())
                 } else {
@@ -231,7 +249,10 @@ mod tests {
     fn pipeline_runs_end_to_end() {
         let report = Pipeline::default().run().unwrap();
         assert_eq!(report.tracks.len(), 10);
-        assert_eq!(report.reports.len(), 10 - AnomalyConfig::default().min_history);
+        assert_eq!(
+            report.reports.len(),
+            10 - AnomalyConfig::default().min_history
+        );
         assert!(!report.similar_pairs.is_empty());
         let (nodes, edges) = report.skygraph.stats();
         assert!(nodes > 50, "expected a populated graph, got {nodes} nodes");

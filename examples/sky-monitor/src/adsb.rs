@@ -49,10 +49,16 @@ pub struct Lcg(u64);
 
 impl Lcg {
     pub fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407))
+        Self(
+            seed.wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407),
+        )
     }
     pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 ^ (self.0 >> 33)
     }
     /// Uniform in `[0, 1)`.
@@ -91,21 +97,131 @@ fn scenario_plans() -> Vec<FlightPlan> {
     const H: i64 = 3600;
     vec![
         // (a) En-route commercial corridor: eastbound ~072 deg at FL350-ish.
-        FlightPlan { icao24: "c01a01", callsign: "ACA101", start_offset_s: 11 * H + 300, duration_s: 240, heading_deg: 72.0, speed_mps: 236.0, alt0_m: 10_600.0, vertical_rate_mps: 0.0, cross_offset_km: 8.0, signal_dbfs: -18.0 },
-        FlightPlan { icao24: "a02b02", callsign: "DAL202", start_offset_s: 13 * H + 2400, duration_s: 240, heading_deg: 74.0, speed_mps: 232.0, alt0_m: 10_800.0, vertical_rate_mps: 0.0, cross_offset_km: -6.0, signal_dbfs: -19.0 },
-        FlightPlan { icao24: "a03c03", callsign: "UAL303", start_offset_s: 15 * H + 1200, duration_s: 240, heading_deg: 71.0, speed_mps: 238.0, alt0_m: 10_700.0, vertical_rate_mps: 0.0, cross_offset_km: 12.0, signal_dbfs: -20.0 },
-        FlightPlan { icao24: "c04d04", callsign: "WJA404", start_offset_s: 18 * H + 1800, duration_s: 240, heading_deg: 73.0, speed_mps: 234.0, alt0_m: 10_500.0, vertical_rate_mps: 0.0, cross_offset_km: 6.0, signal_dbfs: -18.0 },
+        FlightPlan {
+            icao24: "c01a01",
+            callsign: "ACA101",
+            start_offset_s: 11 * H + 300,
+            duration_s: 240,
+            heading_deg: 72.0,
+            speed_mps: 236.0,
+            alt0_m: 10_600.0,
+            vertical_rate_mps: 0.0,
+            cross_offset_km: 8.0,
+            signal_dbfs: -18.0,
+        },
+        FlightPlan {
+            icao24: "a02b02",
+            callsign: "DAL202",
+            start_offset_s: 13 * H + 2400,
+            duration_s: 240,
+            heading_deg: 74.0,
+            speed_mps: 232.0,
+            alt0_m: 10_800.0,
+            vertical_rate_mps: 0.0,
+            cross_offset_km: -6.0,
+            signal_dbfs: -19.0,
+        },
+        FlightPlan {
+            icao24: "a03c03",
+            callsign: "UAL303",
+            start_offset_s: 15 * H + 1200,
+            duration_s: 240,
+            heading_deg: 71.0,
+            speed_mps: 238.0,
+            alt0_m: 10_700.0,
+            vertical_rate_mps: 0.0,
+            cross_offset_km: 12.0,
+            signal_dbfs: -20.0,
+        },
+        FlightPlan {
+            icao24: "c04d04",
+            callsign: "WJA404",
+            start_offset_s: 18 * H + 1800,
+            duration_s: 240,
+            heading_deg: 73.0,
+            speed_mps: 234.0,
+            alt0_m: 10_500.0,
+            vertical_rate_mps: 0.0,
+            cross_offset_km: 6.0,
+            signal_dbfs: -18.0,
+        },
         // Westbound return corridor ~252 deg.
-        FlightPlan { icao24: "400a05", callsign: "BAW505", start_offset_s: 12 * H + 600, duration_s: 240, heading_deg: 252.0, speed_mps: 228.0, alt0_m: 11_200.0, vertical_rate_mps: 0.0, cross_offset_km: -10.0, signal_dbfs: -19.0 },
-        FlightPlan { icao24: "39a006", callsign: "AFR606", start_offset_s: 17 * H + 300, duration_s: 240, heading_deg: 251.0, speed_mps: 230.0, alt0_m: 11_000.0, vertical_rate_mps: 0.0, cross_offset_km: 7.0, signal_dbfs: -18.0 },
+        FlightPlan {
+            icao24: "400a05",
+            callsign: "BAW505",
+            start_offset_s: 12 * H + 600,
+            duration_s: 240,
+            heading_deg: 252.0,
+            speed_mps: 228.0,
+            alt0_m: 11_200.0,
+            vertical_rate_mps: 0.0,
+            cross_offset_km: -10.0,
+            signal_dbfs: -19.0,
+        },
+        FlightPlan {
+            icao24: "39a006",
+            callsign: "AFR606",
+            start_offset_s: 17 * H + 300,
+            duration_s: 240,
+            heading_deg: 251.0,
+            speed_mps: 230.0,
+            alt0_m: 11_000.0,
+            vertical_rate_mps: 0.0,
+            cross_offset_km: 7.0,
+            signal_dbfs: -18.0,
+        },
         // (b) Arrivals descending through the area toward Pearson (~032 deg).
-        FlightPlan { icao24: "c07e07", callsign: "JZA707", start_offset_s: 14 * H + 900, duration_s: 300, heading_deg: 32.0, speed_mps: 145.0, alt0_m: 4_800.0, vertical_rate_mps: -7.5, cross_offset_km: 6.0, signal_dbfs: -12.0 },
-        FlightPlan { icao24: "c08f08", callsign: "SKV808", start_offset_s: 19 * H + 2700, duration_s: 300, heading_deg: 34.0, speed_mps: 150.0, alt0_m: 4_600.0, vertical_rate_mps: -7.0, cross_offset_km: -4.0, signal_dbfs: -12.0 },
+        FlightPlan {
+            icao24: "c07e07",
+            callsign: "JZA707",
+            start_offset_s: 14 * H + 900,
+            duration_s: 300,
+            heading_deg: 32.0,
+            speed_mps: 145.0,
+            alt0_m: 4_800.0,
+            vertical_rate_mps: -7.5,
+            cross_offset_km: 6.0,
+            signal_dbfs: -12.0,
+        },
+        FlightPlan {
+            icao24: "c08f08",
+            callsign: "SKV808",
+            start_offset_s: 19 * H + 2700,
+            duration_s: 300,
+            heading_deg: 34.0,
+            speed_mps: 150.0,
+            alt0_m: 4_600.0,
+            vertical_rate_mps: -7.0,
+            cross_offset_km: -4.0,
+            signal_dbfs: -12.0,
+        },
         // (c) Low-altitude general-aviation overhead pass (lake-shore VFR).
-        FlightPlan { icao24: GA_OVERHEAD_ICAO24, callsign: "CGSKY", start_offset_s: 16 * H + 1800, duration_s: 360, heading_deg: 88.0, speed_mps: 62.0, alt0_m: 1_100.0, vertical_rate_mps: 0.0, cross_offset_km: 0.4, signal_dbfs: -8.0 },
+        FlightPlan {
+            icao24: GA_OVERHEAD_ICAO24,
+            callsign: "CGSKY",
+            start_offset_s: 16 * H + 1800,
+            duration_s: 360,
+            heading_deg: 88.0,
+            speed_mps: 62.0,
+            alt0_m: 1_100.0,
+            vertical_rate_mps: 0.0,
+            cross_offset_km: 0.4,
+            signal_dbfs: -8.0,
+        },
         // (d) Anomalous track: low altitude, slow, off-corridor heading 165,
         //     at 03:10 the following night, very strong signal, no callsign.
-        FlightPlan { icao24: ANOMALOUS_ICAO24, callsign: "", start_offset_s: 27 * H + 600, duration_s: 420, heading_deg: 165.0, speed_mps: 48.0, alt0_m: 450.0, vertical_rate_mps: 0.0, cross_offset_km: 2.0, signal_dbfs: -3.0 },
+        FlightPlan {
+            icao24: ANOMALOUS_ICAO24,
+            callsign: "",
+            start_offset_s: 27 * H + 600,
+            duration_s: 420,
+            heading_deg: 165.0,
+            speed_mps: 48.0,
+            alt0_m: 450.0,
+            vertical_rate_mps: 0.0,
+            cross_offset_km: 2.0,
+            signal_dbfs: -3.0,
+        },
     ]
 }
 
@@ -136,8 +252,11 @@ pub fn generate_scenario(
         // Unit vectors in local (east, north) metres.
         let dir = (h.sin(), h.cos());
         let perp = (h.cos(), -h.sin()); // 90 deg right of heading
-        // Closest point of approach, then back up half the segment.
-        let cpa = (perp.0 * plan.cross_offset_km * 1_000.0, perp.1 * plan.cross_offset_km * 1_000.0);
+                                        // Closest point of approach, then back up half the segment.
+        let cpa = (
+            perp.0 * plan.cross_offset_km * 1_000.0,
+            perp.1 * plan.cross_offset_km * 1_000.0,
+        );
         let half = plan.speed_mps * plan.duration_s as f64 / 2.0;
         let mut east = cpa.0 - dir.0 * half;
         let mut north = cpa.1 - dir.1 * half;
@@ -193,7 +312,11 @@ pub fn parse_dump1090(json: &str) -> Result<Vec<AircraftState>, serde_json::Erro
             };
             let f = |k: &str| ac.get(k).and_then(|x| x.as_f64());
             out.push(AircraftState {
-                icao24: ac.get("hex").and_then(|x| x.as_str()).unwrap_or("").to_lowercase(),
+                icao24: ac
+                    .get("hex")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_lowercase(),
                 callsign: ac
                     .get("flight")
                     .and_then(|x| x.as_str())
@@ -223,8 +346,16 @@ mod tests {
         let a = generate_scenario(43.4675, -79.6877, 42, default_day_start());
         let b = generate_scenario(43.4675, -79.6877, 42, default_day_start());
         assert_eq!(a.len(), b.len());
-        assert!(a.len() > 2_500, "expected ~1 Hz day of samples, got {}", a.len());
-        assert_eq!(a[100].lat.to_bits(), b[100].lat.to_bits(), "must be bit-deterministic");
+        assert!(
+            a.len() > 2_500,
+            "expected ~1 Hz day of samples, got {}",
+            a.len()
+        );
+        assert_eq!(
+            a[100].lat.to_bits(),
+            b[100].lat.to_bits(),
+            "must be bit-deterministic"
+        );
         assert!(a.iter().any(|s| s.icao24 == ANOMALOUS_ICAO24));
         // Sorted by time.
         assert!(a.windows(2).all(|w| w[0].ts <= w[1].ts));

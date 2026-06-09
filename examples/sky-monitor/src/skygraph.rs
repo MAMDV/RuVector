@@ -75,7 +75,10 @@ impl SkyGraph {
                 .property("alt_m", observer.alt_m)
                 .build(),
         )?;
-        Ok(Self { graph, observer_node_id })
+        Ok(Self {
+            graph,
+            observer_node_id,
+        })
     }
 
     fn time_window_id(ts: DateTime<Utc>) -> String {
@@ -106,7 +109,11 @@ impl SkyGraph {
 
     /// Hourly windows overlapped by `[start, end]`.
     fn hours_covering(start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<DateTime<Utc>> {
-        let mut t = start.date_naive().and_hms_opt(start.hour(), 0, 0).unwrap().and_utc();
+        let mut t = start
+            .date_naive()
+            .and_hms_opt(start.hour(), 0, 0)
+            .unwrap()
+            .and_utc();
         let mut out = Vec::new();
         while t <= end {
             out.push(t);
@@ -131,7 +138,8 @@ impl SkyGraph {
         )?;
         for h in Self::hours_covering(w.start, w.end - Duration::seconds(1)) {
             let win = self.ensure_time_window(h)?;
-            self.graph.create_edge(EdgeBuilder::new(w.window_id.clone(), win, "during").build())?;
+            self.graph
+                .create_edge(EdgeBuilder::new(w.window_id.clone(), win, "during").build())?;
         }
         Ok(())
     }
@@ -175,7 +183,11 @@ impl SkyGraph {
                 .build(),
         )?;
         // Evidence observation nodes (first / closest / last samples).
-        for (role, oid) in [("first", first_obs), ("closest_approach", closest_obs), ("last", last_obs)] {
+        for (role, oid) in [
+            ("first", first_obs),
+            ("closest_approach", closest_obs),
+            ("last", last_obs),
+        ] {
             let node_id = format!("obs:{oid}");
             self.graph.create_node(
                 NodeBuilder::new()
@@ -192,36 +204,59 @@ impl SkyGraph {
             )?;
         }
         // Track relationships.
-        self.graph.create_edge(EdgeBuilder::new(track.track_id.clone(), aircraft_id, "part_of_track").build())?;
         self.graph.create_edge(
-            EdgeBuilder::new(track.track_id.clone(), self.observer_node_id.clone(), "observed_by")
-                .property("min_range_m", track.min_range_m)
-                .build(),
+            EdgeBuilder::new(track.track_id.clone(), aircraft_id, "part_of_track").build(),
+        )?;
+        self.graph.create_edge(
+            EdgeBuilder::new(
+                track.track_id.clone(),
+                self.observer_node_id.clone(),
+                "observed_by",
+            )
+            .property("min_range_m", track.min_range_m)
+            .build(),
         )?;
         if track.min_range_m < crate::track::OVERHEAD_RANGE_M {
             self.graph.create_edge(
-                EdgeBuilder::new(track.track_id.clone(), self.observer_node_id.clone(), "near")
-                    .property("range_m", track.min_range_m)
-                    .property("at", track.closest_approach.to_rfc3339())
-                    .build(),
+                EdgeBuilder::new(
+                    track.track_id.clone(),
+                    self.observer_node_id.clone(),
+                    "near",
+                )
+                .property("range_m", track.min_range_m)
+                .property("at", track.closest_approach.to_rfc3339())
+                .build(),
             )?;
         }
         for h in Self::hours_covering(track.started, track.ended) {
             let win = self.ensure_time_window(h)?;
-            self.graph.create_edge(EdgeBuilder::new(track.track_id.clone(), win, "during").build())?;
+            self.graph
+                .create_edge(EdgeBuilder::new(track.track_id.clone(), win, "during").build())?;
         }
-        for w in weather.iter().filter(|w| w.overlaps(track.started, track.ended)) {
+        for w in weather
+            .iter()
+            .filter(|w| w.overlaps(track.started, track.ended))
+        {
             self.graph.create_edge(
-                EdgeBuilder::new(track.track_id.clone(), w.window_id.clone(), "correlated_with")
-                    .property("kind", "weather_context")
-                    .build(),
+                EdgeBuilder::new(
+                    track.track_id.clone(),
+                    w.window_id.clone(),
+                    "correlated_with",
+                )
+                .property("kind", "weather_context")
+                .build(),
             )?;
         }
         Ok(track.track_id.clone())
     }
 
     /// Vector-similarity link between two tracks.
-    pub fn add_similarity(&self, from_track: &str, to_track: &str, distance: f32) -> crate::Result<()> {
+    pub fn add_similarity(
+        &self,
+        from_track: &str,
+        to_track: &str,
+        distance: f32,
+    ) -> crate::Result<()> {
         self.graph.create_edge(
             EdgeBuilder::new(from_track.to_string(), to_track.to_string(), "similar_to")
                 .property("distance", distance as f64)
@@ -232,7 +267,11 @@ impl SkyGraph {
 
     /// Insert an Anomaly node for a scored track. `baseline_track_id` is the
     /// most similar prior track (the baseline the anomaly deviates from).
-    pub fn add_anomaly(&self, report: &AnomalyReport, baseline_track_id: Option<&str>) -> crate::Result<String> {
+    pub fn add_anomaly(
+        &self,
+        report: &AnomalyReport,
+        baseline_track_id: Option<&str>,
+    ) -> crate::Result<String> {
         let anomaly_id = format!("anomaly:{}", report.track_id);
         self.graph.create_node(
             NodeBuilder::new()
@@ -245,14 +284,23 @@ impl SkyGraph {
                 .build(),
         )?;
         self.graph.create_edge(
-            EdgeBuilder::new(report.track_id.clone(), anomaly_id.clone(), "correlated_with")
-                .property("kind", "anomaly_score")
-                .build(),
+            EdgeBuilder::new(
+                report.track_id.clone(),
+                anomaly_id.clone(),
+                "correlated_with",
+            )
+            .property("kind", "anomaly_score")
+            .build(),
         )?;
         if let Some(baseline) = baseline_track_id {
             if self.graph.get_node(baseline).is_some() {
                 self.graph.create_edge(
-                    EdgeBuilder::new(anomaly_id.clone(), baseline.to_string(), "anomalous_relative_to").build(),
+                    EdgeBuilder::new(
+                        anomaly_id.clone(),
+                        baseline.to_string(),
+                        "anomalous_relative_to",
+                    )
+                    .build(),
                 )?;
             }
         }
@@ -260,7 +308,11 @@ impl SkyGraph {
     }
 
     /// Aircraft active in `[start, end]`: `(icao24, track_id)` pairs.
-    pub fn aircraft_in_window(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<(String, String)> {
+    pub fn aircraft_in_window(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Vec<(String, String)> {
         let (s, e) = (start.timestamp(), end.timestamp());
         let mut out: Vec<(String, String)> = self
             .graph
@@ -312,7 +364,9 @@ impl SkyGraph {
         for edge in self.graph.get_outgoing_edges(&track_id.to_string()) {
             match edge.edge_type.as_str() {
                 "observed_by" => evidence.push(format!("observed_by {}", edge.to)),
-                "near" => evidence.push(format!("near {} (closest approach inside 10 km)", edge.to)),
+                "near" => {
+                    evidence.push(format!("near {} (closest approach inside 10 km)", edge.to))
+                }
                 "during" => evidence.push(format!("during {}", edge.to)),
                 "part_of_track" => evidence.push(format!("flight of {}", edge.to)),
                 "similar_to" => evidence.push(format!("similar_to {}", edge.to)),
@@ -334,7 +388,8 @@ impl SkyGraph {
                             ));
                             for be in self.graph.get_outgoing_edges(&edge.to) {
                                 if be.edge_type == "anomalous_relative_to" {
-                                    evidence.push(format!("anomalous_relative_to baseline {}", be.to));
+                                    evidence
+                                        .push(format!("anomalous_relative_to baseline {}", be.to));
                                 }
                             }
                         }

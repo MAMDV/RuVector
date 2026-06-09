@@ -19,10 +19,29 @@ fn run() -> sky_monitor::PipelineReport {
 fn acceptance_1_positions_convert_to_az_el_range() {
     let cfg = ObserverConfig::default();
     // Synthetic target ~10 km north-east, 5 km up.
-    let f = observer_frame(cfg.lat, cfg.lon, cfg.alt_m, cfg.lat + 0.0636, cfg.lon + 0.0875, 5_000.0);
-    assert!(f.range_m > 9_000.0 && f.range_m < 13_500.0, "range {}", f.range_m);
-    assert!(f.azimuth_deg > 30.0 && f.azimuth_deg < 60.0, "az {}", f.azimuth_deg);
-    assert!(f.elevation_deg > 20.0 && f.elevation_deg < 35.0, "el {}", f.elevation_deg);
+    let f = observer_frame(
+        cfg.lat,
+        cfg.lon,
+        cfg.alt_m,
+        cfg.lat + 0.0636,
+        cfg.lon + 0.0875,
+        5_000.0,
+    );
+    assert!(
+        f.range_m > 9_000.0 && f.range_m < 13_500.0,
+        "range {}",
+        f.range_m
+    );
+    assert!(
+        f.azimuth_deg > 30.0 && f.azimuth_deg < 60.0,
+        "az {}",
+        f.azimuth_deg
+    );
+    assert!(
+        f.elevation_deg > 20.0 && f.elevation_deg < 35.0,
+        "el {}",
+        f.elevation_deg
+    );
 
     // And every pipeline observation carries a finite observer frame.
     let report = run();
@@ -59,17 +78,24 @@ fn acceptance_3_aircraft_by_time_window() {
     let pipeline = Pipeline::default();
     // 11:00–12:00 UTC contains exactly the first eastbound corridor flight.
     let start = pipeline.day_start + Duration::hours(11);
-    let in_window = report.skygraph.aircraft_in_window(start, start + Duration::hours(1));
+    let in_window = report
+        .skygraph
+        .aircraft_in_window(start, start + Duration::hours(1));
     assert_eq!(in_window.len(), 1, "got {in_window:?}");
     assert_eq!(in_window[0].0, "c01a01");
     // The anomaly night window (+27 h) contains exactly the anomalous track.
     let night = pipeline.day_start + Duration::hours(27);
-    let in_night = report.skygraph.aircraft_in_window(night, night + Duration::hours(1));
+    let in_night = report
+        .skygraph
+        .aircraft_in_window(night, night + Duration::hours(1));
     assert_eq!(in_night.len(), 1, "got {in_night:?}");
     assert_eq!(in_night[0].0, ANOMALOUS_ICAO24);
     // An empty pre-dawn window has no aircraft.
     let empty = pipeline.day_start + Duration::hours(2);
-    assert!(report.skygraph.aircraft_in_window(empty, empty + Duration::hours(1)).is_empty());
+    assert!(report
+        .skygraph
+        .aircraft_in_window(empty, empty + Duration::hours(1))
+        .is_empty());
 }
 
 /// (4) §31.8 / §15 — after the baseline period the anomalous track raises a
@@ -91,7 +117,10 @@ fn acceptance_4_anomaly_scoring_separates_corridor_traffic() {
         anomaly.components
     );
     assert!(anomaly.band >= Interpretation::StrongAnomaly);
-    assert!(!anomaly.reasons.is_empty(), "governance rule 2: reasons required");
+    assert!(
+        !anomaly.reasons.is_empty(),
+        "governance rule 2: reasons required"
+    );
 
     let corridor: Vec<_> = report
         .reports
@@ -101,7 +130,10 @@ fn acceptance_4_anomaly_scoring_separates_corridor_traffic() {
                 || WESTBOUND_CORRIDOR.contains(&r.icao24.as_str())
         })
         .collect();
-    assert!(!corridor.is_empty(), "some corridor flights must be scored post-baseline");
+    assert!(
+        !corridor.is_empty(),
+        "some corridor flights must be scored post-baseline"
+    );
     for r in corridor {
         assert!(
             r.score <= 0.55,
@@ -124,16 +156,31 @@ fn acceptance_5_explain_cites_observation_ids() {
         .iter()
         .find(|t| t.icao24 == ANOMALOUS_ICAO24)
         .unwrap();
-    let explanation = report.skygraph.explain(&anomalous.track_id).expect("track explainable");
+    let explanation = report
+        .skygraph
+        .explain(&anomalous.track_id)
+        .expect("track explainable");
     assert_eq!(explanation.aircraft_id, ANOMALOUS_ICAO24);
     let joined = explanation.evidence.join("\n");
-    assert!(joined.contains(&anomalous.track_id), "must cite the track id");
+    assert!(
+        joined.contains(&anomalous.track_id),
+        "must cite the track id"
+    );
     let (first, closest, last) = anomalous.evidence_observation_ids();
     for oid in [first, closest, last] {
-        assert!(joined.contains(&oid.to_string()), "must cite observation {oid}");
+        assert!(
+            joined.contains(&oid.to_string()),
+            "must cite observation {oid}"
+        );
     }
-    assert!(joined.contains("anomaly score"), "must surface the anomaly evidence");
-    assert!(joined.contains("anomalous_relative_to"), "must cite the deviated-from baseline");
+    assert!(
+        joined.contains("anomaly score"),
+        "must surface the anomaly evidence"
+    );
+    assert!(
+        joined.contains("anomalous_relative_to"),
+        "must cite the deviated-from baseline"
+    );
 }
 
 /// (6) §22 Phase 4 — similarity search returns same-corridor flights before
@@ -166,7 +213,10 @@ fn acceptance_6_similarity_prefers_same_corridor() {
         .iter()
         .filter(|i| pair.0.contains(*i) || pair.1.contains(*i))
         .count();
-    assert_eq!(both_eastbound, 2, "closest eastbound pair must be two eastbound flights: {pair:?}");
+    assert_eq!(
+        both_eastbound, 2,
+        "closest eastbound pair must be two eastbound flights: {pair:?}"
+    );
 }
 
 /// (7) §31.7 — the daily brief renders with non-zero counts.
@@ -177,7 +227,10 @@ fn acceptance_7_brief_renders_with_counts() {
     assert_eq!(brief.aircraft_observed, 10);
     assert!(brief.overhead_candidates > 0);
     assert!(brief.unusual_tracks > 0);
-    assert!(!brief.weather_events.is_empty(), "the rain band must be reported");
+    assert!(
+        !brief.weather_events.is_empty(),
+        "the rain band must be reported"
+    );
     let text = brief.to_string();
     assert!(text.contains("Sky brief — oakville_node"));
     assert!(text.contains("10 aircraft observed"));
@@ -203,6 +256,13 @@ fn acceptance_8_dump1090_parser() {
     assert!((states[0].alt_m - 10_668.0).abs() < 1.0);
     // The parsed state projects into the observer frame like any other.
     let cfg = ObserverConfig::default();
-    let f = observer_frame(cfg.lat, cfg.lon, cfg.alt_m, states[0].lat, states[0].lon, states[0].alt_m);
+    let f = observer_frame(
+        cfg.lat,
+        cfg.lon,
+        cfg.alt_m,
+        states[0].lat,
+        states[0].lon,
+        states[0].alt_m,
+    );
     assert!(f.range_m > 5_000.0 && f.elevation_deg > 30.0);
 }

@@ -101,7 +101,11 @@ mod tests {
         assert_eq!(a[5].wind_mps.to_bits(), b[5].wind_mps.to_bits());
         assert_eq!(a[14].condition, WeatherCondition::Rain);
         assert!(a[14].alert.is_some());
-        assert_eq!(a[27].condition, WeatherCondition::Clear, "anomaly hour is clear");
+        assert_eq!(
+            a[27].condition,
+            WeatherCondition::Clear,
+            "anomaly hour is clear"
+        );
         // Overlap math.
         assert!(a[14].overlaps(a[14].start, a[14].end));
         assert!(!a[14].overlaps(a[16].start, a[16].end));

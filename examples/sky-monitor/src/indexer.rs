@@ -56,7 +56,10 @@ impl TrackIndexer {
             hnsw_config: None,
             quantization: None,
         };
-        Ok(Self { db: VectorDB::new(options)?, len: 0 })
+        Ok(Self {
+            db: VectorDB::new(options)?,
+            len: 0,
+        })
     }
 
     /// Number of indexed tracks.
@@ -71,12 +74,19 @@ impl TrackIndexer {
     /// Insert one track embedding with its provenance metadata
     /// (`track_id`, `icao24`, `label` = callsign or icao24).
     pub fn insert_track(&mut self, track: &Track, embedding: Vec<f32>) -> crate::Result<()> {
-        let label = if track.callsign.is_empty() { track.icao24.clone() } else { track.callsign.clone() };
+        let label = if track.callsign.is_empty() {
+            track.icao24.clone()
+        } else {
+            track.callsign.clone()
+        };
         let mut metadata = HashMap::new();
         metadata.insert("track_id".to_string(), serde_json::json!(track.track_id));
         metadata.insert("icao24".to_string(), serde_json::json!(track.icao24));
         metadata.insert("label".to_string(), serde_json::json!(label));
-        metadata.insert("overhead".to_string(), serde_json::json!(track.is_overhead_candidate));
+        metadata.insert(
+            "overhead".to_string(),
+            serde_json::json!(track.is_overhead_candidate),
+        );
         self.db.insert(VectorEntry {
             id: Some(track.track_id.clone()),
             vector: embedding,
@@ -141,9 +151,15 @@ mod tests {
         // Query with the first eastbound corridor flight: best match (not
         // itself) must be another eastbound corridor flight.
         let i = tracks.iter().position(|t| t.icao24 == "c01a01").unwrap();
-        let hits = idx.similar_tracks(&embeddings[i], Some(&tracks[i].track_id), 3).unwrap();
+        let hits = idx
+            .similar_tracks(&embeddings[i], Some(&tracks[i].track_id), 3)
+            .unwrap();
         assert!(!hits.is_empty());
-        let top_icao = &tracks.iter().find(|t| t.track_id == hits[0].0).unwrap().icao24;
+        let top_icao = &tracks
+            .iter()
+            .find(|t| t.track_id == hits[0].0)
+            .unwrap()
+            .icao24;
         assert!(
             ["a02b02", "a03c03", "c04d04"].contains(&top_icao.as_str()),
             "expected an eastbound corridor flight, got {top_icao}"
