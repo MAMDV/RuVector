@@ -216,7 +216,8 @@ impl SatPropagator {
             let mut open: Option<Open> = None;
             let mut prev_el = f64::NEG_INFINITY;
             let mut prev_t = start_unix;
-            for k in 0..=steps {
+            // `sun` has exactly `steps + 1` samples, one per time step.
+            for (k, (dir, dark)) in sun.iter().enumerate() {
                 let t = start_unix + k as f64 * step_s;
                 let minutes = (t - sat.epoch_unix) / 60.0;
                 let geo = sat
@@ -250,7 +251,6 @@ impl SatPropagator {
                         p.az_culm = az;
                         p.t_culm = t;
                     }
-                    let (dir, dark) = &sun[k];
                     if *dark && sat_sunlit(lat, lon, alt_m, dir) {
                         p.visible = true;
                     }
