@@ -47,14 +47,62 @@ fn clamp01(v: f64) -> f32 {
     v.clamp(0.0, 1.0) as f32
 }
 
+/// Lightweight per-point sample for embedding a track when a full [`Track`]
+/// (with `Observation` provenance) is unavailable — e.g. the live browser
+/// feed embedded through `sky-monitor-wasm`. Field meanings match
+/// [`crate::track::TrackPoint`]; `t_unix` is Unix epoch seconds (UTC).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EmbeddingSample {
+    pub t_unix: f64,
+    pub lat: f64,
+    pub lon: f64,
+    pub alt_m: f64,
+    pub speed_mps: f64,
+    pub track_deg: f64,
+    pub vertical_rate_mps: f64,
+    pub signal_dbfs: f64,
+    pub azimuth_deg: f64,
+    pub elevation_deg: f64,
+    pub range_m: f64,
+}
+
 /// Compute the 32-dimensional track embedding described in the module docs.
-/// Fully deterministic in the track contents.
+/// Fully deterministic in the track contents. Delegates to
+/// [`track_embedding_from_samples`] so the native and live (wasm) ingestion
+/// paths share one normalization.
 pub fn track_embedding(track: &Track) -> Vec<f32> {
+    let samples: Vec<EmbeddingSample> = track
+        .points
+        .iter()
+        .map(|p| EmbeddingSample {
+            t_unix: p.ts.timestamp_millis() as f64 / 1000.0,
+            lat: p.lat,
+            lon: p.lon,
+            alt_m: p.alt_m,
+            speed_mps: p.speed_mps,
+            track_deg: p.track_deg,
+            vertical_rate_mps: p.vertical_rate_mps,
+            signal_dbfs: p.signal_dbfs,
+            azimuth_deg: p.frame.azimuth_deg,
+            elevation_deg: p.frame.elevation_deg,
+            range_m: p.frame.range_m,
+        })
+        .collect();
+    track_embedding_from_samples(&samples)
+}
+
+/// [`track_embedding`] over raw samples: the same single-pass accumulation
+/// and normalization, with the track-level statistics (start time, duration,
+/// `min_range_m`, `max_elevation_deg`, overhead-candidate flag) derived from
+/// the samples exactly as `Track::from_points` derives them from points.
+/// An empty slice embeds to the zero vector.
+pub fn track_embedding_from_samples(pts: &[EmbeddingSample]) -> Vec<f32> {
     let mut e = vec![0.0f32; TRACK_EMBEDDING_DIM];
+    if pts.is_empty() {
+        return e;
+    }
     // Single pass over the points: accumulate every per-point statistic at
-    // once instead of one full iteration per feature (the Track stat methods
-    // would walk the point list ~14 times and allocate a temp Vec).
-    let pts = &track.points;
+    // once instead of one full iteration per feature.
     let count = pts.len();
     let nf = count as f64;
     let mut alt_sum = 0.0f64;
@@ -74,6 +122,8 @@ pub fn track_embedding(track: &Track) -> Vec<f32> {
     let mut path_m = 0.0f64;
     let mut prev_lat = 0.0f64;
     let mut prev_lon = 0.0f64;
+    let mut min_range = f64::INFINITY;
+    let mut max_el = f64::NEG_INFINITY;
     for (i, p) in pts.iter().enumerate() {
         alt_sum += p.alt_m;
         alt_sq += p.alt_m * p.alt_m;
@@ -82,7 +132,7 @@ pub fn track_embedding(track: &Track) -> Vec<f32> {
         speed_sum += p.speed_mps;
         speed_sq += p.speed_mps * p.speed_mps;
         sig_sum += p.signal_dbfs;
-        elev_sum += p.frame.elevation_deg;
+        elev_sum += p.elevation_deg;
         vr_abs_sum += p.vertical_rate_mps.abs();
         if p.vertical_rate_mps > 2.0 {
             climb += 1;
@@ -93,8 +143,10 @@ pub fn track_embedding(track: &Track) -> Vec<f32> {
         let r = p.track_deg.to_radians();
         head_s += r.sin();
         head_c += r.cos();
-        let b = ((p.frame.azimuth_deg.rem_euclid(360.0)) / 45.0) as usize % 8;
+        let b = ((p.azimuth_deg.rem_euclid(360.0)) / 45.0) as usize % 8;
         buckets[b] += 1;
+        min_range = min_range.min(p.range_m);
+        max_el = max_el.max(p.elevation_deg);
         if i > 0 {
             // Equirectangular step, identical to Track::path_length_m.
             let dy = (p.lat - prev_lat) * 111_132.0;
@@ -104,14 +156,10 @@ pub fn track_embedding(track: &Track) -> Vec<f32> {
         prev_lat = p.lat;
         prev_lon = p.lon;
     }
-    let mean = |sum: f64| if count == 0 { 0.0 } else { sum / nf };
+    let mean = |sum: f64| sum / nf;
     let std = |sq: f64, sum: f64| {
-        if count == 0 {
-            0.0
-        } else {
-            let m = sum / nf;
-            (sq / nf - m * m).max(0.0).sqrt()
-        }
+        let m = sum / nf;
+        (sq / nf - m * m).max(0.0).sqrt()
     };
 
     e[0] = clamp01(mean(alt_sum) / 12_000.0);
@@ -125,23 +173,25 @@ pub fn track_embedding(track: &Track) -> Vec<f32> {
     e[5] = ((h.cos() + 1.0) / 2.0) as f32;
 
     // Time of day on the unit circle (UTC), half-amplitude so route class
-    // dominates time of day in distance terms.
-    let frac = (track.started.hour() as f64 + track.started.minute() as f64 / 60.0) / 24.0;
+    // dominates time of day in distance terms. Derived from the first
+    // sample's epoch seconds (matches `started.hour() + minute()/60`).
+    let sod = pts[0].t_unix.rem_euclid(86_400.0);
+    let frac = ((sod / 3_600.0).floor() + ((sod % 3_600.0) / 60.0).floor() / 60.0) / 24.0;
     let a = frac * std::f64::consts::TAU;
     e[6] = (0.5 + 0.25 * a.sin()) as f32;
     e[7] = (0.5 + 0.25 * a.cos()) as f32;
 
-    e[8] = clamp01(track.min_range_m / 50_000.0);
-    e[9] = clamp01(track.max_elevation_deg / 90.0);
+    e[8] = clamp01(min_range / 50_000.0);
+    e[9] = clamp01(max_el / 90.0);
     e[10] = clamp01(mean(elev_sum) / 90.0);
-    e[11] = clamp01(track.duration_secs() / 1_800.0);
-    e[12] = clamp01(if count == 0 { 0.0 } else { climb as f64 / nf });
-    e[13] = clamp01(if count == 0 { 0.0 } else { descent as f64 / nf });
+    e[11] = clamp01((pts[count - 1].t_unix - pts[0].t_unix) / 1_800.0);
+    e[12] = clamp01(climb as f64 / nf);
+    e[13] = clamp01(descent as f64 / nf);
     // Net displacement / path length, as Track::straightness.
     let straightness = if path_m < 1.0 {
         1.0
     } else {
-        let (a, b) = (pts.first().unwrap(), pts.last().unwrap());
+        let (a, b) = (&pts[0], &pts[count - 1]);
         let dy = (b.lat - a.lat) * 111_132.0;
         let dx = (b.lon - a.lon) * 111_320.0 * ((a.lat + b.lat) / 2.0).to_radians().cos();
         (dx.hypot(dy) / path_m).clamp(0.0, 1.0)
@@ -151,18 +201,20 @@ pub fn track_embedding(track: &Track) -> Vec<f32> {
 
     // Coarse azimuth occupancy: fraction of samples seen in each 45° sky
     // sector around the observer (route-class signature).
-    let n = count.max(1) as f64;
     for (b, &hits) in buckets.iter().enumerate() {
-        e[16 + b] = (f64::from(hits) / n) as f32;
+        e[16 + b] = (f64::from(hits) / nf) as f32;
     }
 
     e[24] = clamp01((mean(sig_sum) + 40.0) / 40.0);
     e[25] = clamp01(std(speed_sq, speed_sum) / 50.0);
     e[26] = clamp01(std(alt_sq, alt_sum) / 3_000.0);
-    e[27] = clamp01(pts.first().map(|p| p.frame.range_m).unwrap_or(0.0) / 50_000.0);
-    e[28] = clamp01(pts.last().map(|p| p.frame.range_m).unwrap_or(0.0) / 50_000.0);
+    e[27] = clamp01(pts[0].range_m / 50_000.0);
+    e[28] = clamp01(pts[count - 1].range_m / 50_000.0);
     e[29] = clamp01(count as f64 / 600.0);
-    e[30] = if track.is_overhead_candidate {
+    // ADR §14 rule 1, exactly as Track::from_points sets the flag.
+    e[30] = if min_range < crate::track::OVERHEAD_RANGE_M
+        && max_el > crate::track::OVERHEAD_ELEVATION_DEG
+    {
         1.0
     } else {
         0.0
@@ -270,5 +322,43 @@ mod tests {
         assert_eq!(rain[3], 1.0, "rain window carries an alert");
         let clear = weather_window_embedding(&w[2]);
         assert_eq!(clear[3], 0.0);
+    }
+
+    #[test]
+    fn sample_embedding_matches_track_embedding() {
+        for t in tracks() {
+            let direct = track_embedding(&t);
+            let samples: Vec<EmbeddingSample> = t
+                .points
+                .iter()
+                .map(|p| EmbeddingSample {
+                    t_unix: p.ts.timestamp_millis() as f64 / 1000.0,
+                    lat: p.lat,
+                    lon: p.lon,
+                    alt_m: p.alt_m,
+                    speed_mps: p.speed_mps,
+                    track_deg: p.track_deg,
+                    vertical_rate_mps: p.vertical_rate_mps,
+                    signal_dbfs: p.signal_dbfs,
+                    azimuth_deg: p.frame.azimuth_deg,
+                    elevation_deg: p.frame.elevation_deg,
+                    range_m: p.frame.range_m,
+                })
+                .collect();
+            assert_eq!(
+                direct,
+                track_embedding_from_samples(&samples),
+                "{}",
+                t.icao24
+            );
+        }
+    }
+
+    #[test]
+    fn empty_samples_embed_to_zero() {
+        assert_eq!(
+            track_embedding_from_samples(&[]),
+            vec![0.0; TRACK_EMBEDDING_DIM]
+        );
     }
 }

@@ -36,8 +36,8 @@ the door open for real RTL-SDR data. Vectors live in
 # demo (from the repository root)
 cargo run -p sky-monitor --release
 
-# demo + dashboard data export (writes `const SKY_DATA = {...};` for .js paths)
-cargo run -p sky-monitor --release -- --emit-json examples/sky-monitor/ui/dashboard/sky-demo-data.js
+# demo + JSON export of the synthetic day (writes `const SKY_DATA = {...};` for .js paths)
+cargo run -p sky-monitor --release -- --emit-json target/sky-demo-data.js
 
 # acceptance + unit tests (mapped to ADR-199 §31 / §22)
 cargo test -p sky-monitor
@@ -74,6 +74,17 @@ first"), wrapping the pure subset with `wasm-bindgen`:
   start_hour, mean_signal_dbfs, min_range_m, max_elevation_deg}`), reusing the
   exact core §15 scorer (`anomaly::BaselineStats::from_summaries` /
   `anomaly::score_summary`) so browser scores match the native pipeline.
+* `SatPropagator` — SGP4 satellite propagation from TLEs (`sgp4` crate):
+  TEME → GMST-rotated ECEF → geodetic (Bowring) → the same §10 observer
+  frame, batched per frame for the dashboard's satellite layer; plus
+  `predict_passes(start, hours, step)` — a 24 h pass timeline (rise /
+  culmination / set / max elevation per pass, with a low-precision Rust sun
+  model flagging naked-eye-visible passes: sunlit satellite, sun < −6°).
+* `embed_track` / `novelty` (`embed.rs`) — the §13 32-dim track embedding
+  from live points (per-point motion derived by finite differences, then the
+  canonical `embedding::track_embedding_from_samples`) and the §15
+  vector-novelty score with the native indexer calibration
+  (mean top-3 distance / 1.2, neutral 0.5 with no priors).
 * `parse_dump1090_json` — the core dump1090 parser for live feeds, and
   `band_for(score)` / `version()` helpers.
 
@@ -85,14 +96,29 @@ wasm-pack build examples/sky-monitor/wasm --target web --out-dir ../ui/dashboard
 
 ## Canvas dashboard (`ui/dashboard/`)
 
-Vanilla JS + Canvas, no build tooling (see `ui/dashboard/README.md`): an
-all-sky polar plot (elevation rings at 0/30/60°, compass labels) showing
-aircraft as labelled dots with fading trails, overhead-candidate highlight
-rings, anomaly badges colored by band, a side panel with the live track table
-and §15 anomaly reasons, and a replay scrubber over the embedded deterministic
-scenario (`sky-demo-data.js`, regenerated via `--emit-json` above).
-Projection runs in JS by default and switches to `sky-monitor-wasm`
-automatically when the wasm-pack output is present at `ui/dashboard/pkg/`.
+Vanilla JS + Canvas, no build tooling (see `ui/dashboard/README.md`): a
+**realtime** all-sky polar plot (elevation rings at 0/30/60°, compass labels)
+showing live ADS-B aircraft (airplanes.live primary, adsb.lol fallback;
+key-free, CORS-friendly) as labelled dots with fading trails and smoothed
+dead-reckoned motion between polls, Open-Meteo weather + NOAA SWPC Kp in the
+weather card, and a side panel with the live track table, per-track details,
+and a 24 h naked-eye satellite **pass timeline** (wasm `predict_passes`,
+optional Notification alerts). A satellite layer (CelesTrak `visual` /
+`stations` / `starlink` TLEs + wasm SGP4) draws satellites as diamonds —
+flagging sunlit-against-dark-sky passes ✦ — with an experimental **WebGPU**
+instanced-sprite path (drawer toggle, automatic Canvas2D fallback). Live
+tracks are scored through the wasm §15 `AnomalyScorer` with **real §13
+vector novelty** (wasm `embed_track` + IndexedDB rolling store of past track
+embeddings), annotated with **behavior badges** (holding / survey grid /
+go-around / formation) and pairwise **CPA conflict prediction** (< 1 km &
+< 300 m within 90 s → dashed alert line + predicted-path cone), and enriched
+with readsb metadata plus **adsbdb routes** (airline, origin → destination,
+on selection, 24 h cache). A footer scrubber **replays the last hour of
+recorded real traffic** from an IndexedDB ring buffer (no synthetic data).
+There is no embedded scenario; offline, the dome stays up with a retrying
+status line. Projection runs in JS by default and switches to
+`sky-monitor-wasm` automatically when the wasm-pack output is present at
+`ui/dashboard/pkg/` (satellites, scoring, novelty, and passes require it).
 
 ```bash
 cd examples/sky-monitor/ui/dashboard && python3 -m http.server 8000

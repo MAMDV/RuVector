@@ -14,6 +14,11 @@
 //! * [`AnomalyScorer`] — baseline + scoring over JSON track summaries, reusing
 //!   the core `anomaly` module (`BaselineStats::from_summaries` /
 //!   `score_summary`) so browser scores match the native pipeline exactly.
+//! * [`embed::embed_track`] / [`embed::novelty`] — §13 32-dim track
+//!   embeddings from live points and the §15 vector-novelty score (mirrors
+//!   the native indexer calibration), for the browser novelty store.
+//! * [`SatPropagator`] — SGP4 satellite propagation from TLEs
+//!   ([`sat`]: TEME → GMST-rotated ECEF → geodetic → observer az/el/range).
 //! * [`parse_dump1090_json`] — the core dump1090 `aircraft.json` parser, for
 //!   live feeds proxied into the browser.
 
@@ -22,7 +27,11 @@ use sky_monitor::config::AnomalyConfig;
 use sky_monitor::coords::observer_frame;
 use wasm_bindgen::prelude::*;
 
+pub mod embed;
+pub mod sat;
 pub mod screen;
+
+pub use sat::SatPropagator;
 
 fn js_err(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())

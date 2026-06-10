@@ -47,7 +47,10 @@ pub use anomaly::{
 pub use brief::DailySkyBrief;
 pub use config::{AnomalyConfig, ObserverConfig};
 pub use coords::{geodetic_to_ecef, observer_frame, Ecef, Enu, ObserverFrame};
-pub use embedding::{track_embedding, weather_window_embedding, TRACK_EMBEDDING_DIM};
+pub use embedding::{
+    track_embedding, track_embedding_from_samples, weather_window_embedding, EmbeddingSample,
+    TRACK_EMBEDDING_DIM,
+};
 #[cfg(feature = "appliance")]
 pub use indexer::TrackIndexer;
 pub use observation::{EntityType, GeoPosition, Motion, Observation};
