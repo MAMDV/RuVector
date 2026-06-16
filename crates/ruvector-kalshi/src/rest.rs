@@ -145,9 +145,12 @@ impl RestClient {
     }
 
     /// Amend an existing open order's price or size. Refuses unless
-    /// `KALSHI_ENABLE_LIVE=1`. Kalshi's endpoint is a PATCH.
+    /// `KALSHI_ENABLE_LIVE=1`.
     pub async fn amend_order(&self, order_id: &str, amend: &AmendOrder) -> Result<OrderAck> {
         require_live_flag()?;
+        // Kalshi V1: POST /portfolio/orders/{order_id}/amend (NOT PATCH).
+        // The V2 canonical path is POST /portfolio/events/orders/{order_id}/amend.
+        // DO NOT change to PATCH — Kalshi returns 405 on PATCH for this endpoint.
         let path = format!("/portfolio/orders/{order_id}/amend");
         self.send(reqwest::Method::POST, &path, Some(amend)).await
     }
