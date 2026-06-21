@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use crate::auth::Signer;
 use crate::models::{
-    AmendOrder, CancelResponse, Market, MarketsResponse, NewOrder, OrderAck, OrderbookResponse,
-    OrderbookSnapshot,
+    Market, MarketsResponse, OrderAck, OrderbookResponse, OrderbookSnapshot, V2AmendAck,
+    V2AmendOrder, V2CancelAck, V2CreateOrderRequest, V2OrderResponse,
 };
 use crate::rate_limit::RateLimiter;
 use crate::{KalshiError, Result};
@@ -130,29 +130,48 @@ impl RestClient {
         Ok(resp.orderbook)
     }
 
-    /// Place a new order. Refuses to run unless `KALSHI_ENABLE_LIVE=1`.
-    pub async fn post_order(&self, order: &NewOrder) -> Result<OrderAck> {
+    /// Place a new V2 order (POST /portfolio/events/orders). Refuses to run
+    /// unless `KALSHI_ENABLE_LIVE=1`. The V2 response is a LIGHTWEIGHT flat ack
+    /// ([`V2OrderResponse`]) — the full order is read back via [`Self::get_order`].
+    pub async fn post_order(&self, order: &V2CreateOrderRequest) -> Result<V2OrderResponse> {
         require_live_flag()?;
-        self.send(reqwest::Method::POST, "/portfolio/orders", Some(order))
-            .await
+        self.send(
+            reqwest::Method::POST,
+            "/portfolio/events/orders",
+            Some(order),
+        )
+        .await
     }
 
-    /// Cancel an open order. Refuses to run unless `KALSHI_ENABLE_LIVE=1`.
-    pub async fn cancel_order(&self, order_id: &str) -> Result<CancelResponse> {
+    /// Cancel an open order (DELETE /portfolio/events/orders/{id}). Refuses
+    /// unless `KALSHI_ENABLE_LIVE=1`. The V2 ack does NOT echo the order; read
+    /// the resulting state back via [`Self::get_order`].
+    pub async fn cancel_order(&self, order_id: &str) -> Result<V2CancelAck> {
         require_live_flag()?;
-        let path = format!("/portfolio/orders/{order_id}");
+        let path = format!("/portfolio/events/orders/{order_id}");
         self.send(reqwest::Method::DELETE, &path, NO_BODY).await
     }
 
-    /// Amend an existing open order's price or size. Refuses unless
-    /// `KALSHI_ENABLE_LIVE=1`.
-    pub async fn amend_order(&self, order_id: &str, amend: &AmendOrder) -> Result<OrderAck> {
+    /// Amend an existing open order (POST /portfolio/events/orders/{id}/amend).
+    /// Refuses unless `KALSHI_ENABLE_LIVE=1`. The V2 ack does NOT echo the
+    /// order; read the resulting state back via [`Self::get_order`].
+    ///
+    /// DO NOT change to PATCH — Kalshi returns 405 on PATCH for this endpoint.
+    pub async fn amend_order(&self, order_id: &str, amend: &V2AmendOrder) -> Result<V2AmendAck> {
         require_live_flag()?;
-        // Kalshi V1: POST /portfolio/orders/{order_id}/amend (NOT PATCH).
-        // The V2 canonical path is POST /portfolio/events/orders/{order_id}/amend.
-        // DO NOT change to PATCH — Kalshi returns 405 on PATCH for this endpoint.
-        let path = format!("/portfolio/orders/{order_id}/amend");
+        let path = format!("/portfolio/events/orders/{order_id}/amend");
         self.send(reqwest::Method::POST, &path, Some(amend)).await
+    }
+
+    /// Read back a single order by id (GET /portfolio/orders/{id}). This is a
+    /// READ — NOT part of the V2 mutation deprecation, so it stays on its
+    /// current path (ADR-018 §Amendment 2026-06-19) — and it is deliberately
+    /// NOT gated on `KALSHI_ENABLE_LIVE`. It composes the witness receipt's
+    /// resulting-state after a V2 cancel/amend, whose lightweight ack no longer
+    /// echoes the order.
+    pub async fn get_order(&self, order_id: &str) -> Result<OrderAck> {
+        let path = format!("/portfolio/orders/{order_id}");
+        self.send(reqwest::Method::GET, &path, NO_BODY).await
     }
 }
 
@@ -225,14 +244,13 @@ mod tests {
         std::env::remove_var("KALSHI_ENABLE_LIVE");
         let client =
             RestClient::new("https://trading-api.kalshi.com/trade-api/v2", test_signer()).unwrap();
-        let order = NewOrder {
+        let order = crate::models::V2CreateOrderRequest {
             ticker: "X".into(),
-            action: crate::models::OrderAction::Buy,
-            side: crate::models::OrderSide::Yes,
-            order_type: crate::models::OrderType::Limit,
-            count: 1,
-            yes_price: Some(24),
-            no_price: None,
+            side: crate::models::V2Side::Bid,
+            count: "1.00".into(),
+            price: "0.24".into(),
+            time_in_force: crate::models::TimeInForce::GoodTillCanceled,
+            self_trade_prevention_type: crate::models::SelfTradePreventionType::TakerAtCross,
             client_order_id: "t-1".into(),
         };
         let err = client.post_order(&order).await.unwrap_err();
@@ -258,9 +276,13 @@ mod tests {
         std::env::remove_var("KALSHI_ENABLE_LIVE");
         let client =
             RestClient::new("https://trading-api.kalshi.com/trade-api/v2", test_signer()).unwrap();
-        let amend = crate::models::AmendOrder {
-            yes_price: Some(25),
-            ..Default::default()
+        let amend = crate::models::V2AmendOrder {
+            ticker: "X".into(),
+            side: crate::models::V2Side::Bid,
+            price: "0.25".into(),
+            count: "1.00".into(),
+            client_order_id: None,
+            updated_client_order_id: None,
         };
         let err = client
             .amend_order("some-order-id", &amend)

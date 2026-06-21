@@ -180,13 +180,15 @@ async fn main() -> anyhow::Result<()> {
             Ok(ack) => {
                 orders_sent += 1;
                 println!(
-                    "  ORDER {} accepted id={} status={}",
-                    orders_sent, ack.order.order_id, ack.order.status
+                    "  ORDER {} accepted id={} remaining={}",
+                    orders_sent,
+                    ack.order_id,
+                    ack.remaining_count.as_deref().unwrap_or("?"),
                 );
                 // Simulate the order sitting in the book — we don't yet
                 // consume fills here. Update cash optimistically; a real
                 // deployment reconciles against the fill stream.
-                let cost = order.count.saturating_mul(approved.limit_price_cents);
+                let cost = approved.quantity.saturating_mul(approved.limit_price_cents);
                 portfolio.cash_cents = portfolio.cash_cents.saturating_sub(cost);
             }
             Err(e) => eprintln!("  ORDER FAILED: {e}"),

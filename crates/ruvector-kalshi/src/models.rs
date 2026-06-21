@@ -47,6 +47,21 @@ pub fn count_fp_str_to_contracts(s: &str) -> Option<i64> {
     s.split_once('.').map(|(w, _)| w).unwrap_or(s).parse().ok()
 }
 
+/// Encode integer cents (0..=100 for a Kalshi binary contract) as a V2
+/// fixed-point US-dollar price string: `56 -> "0.56"`, `100 -> "1.00"`. Clamps
+/// to the binary-contract range so a malformed input can never serialize a
+/// negative or out-of-band price onto the money path.
+pub fn cents_to_dollars_str(cents: i64) -> String {
+    let c = cents.clamp(0, 100);
+    format!("{}.{:02}", c / 100, c % 100)
+}
+
+/// Encode an integer contract count as a V2 fixed-point count string:
+/// `1 -> "1.00"`, `10 -> "10.00"`.
+pub fn contracts_to_count_fp(count: i64) -> String {
+    format!("{}.00", count.max(0))
+}
+
 /// Deserialize a Kalshi orderbook side — `[[priceDollarsStr, countFpStr], …]`
 /// — into `Vec<[i64; 2]>` of `[price_cents, contracts]`, preserving the
 /// internal `[i64; 2]` shape `normalize::orderbook_to_events` consumes.
@@ -186,65 +201,140 @@ pub struct OrderbookResponse {
     pub orderbook: OrderbookSnapshot,
 }
 
-/// Order placement payload (POST /portfolio/orders).
-#[derive(Debug, Clone, Serialize)]
-pub struct NewOrder {
+// ---------------------------------------------------------------------------
+// V2 order-mutation DTOs (ADR-018 §Amendment 2026-06-19).
+//
+// Kalshi deprecated the legacy `/portfolio/orders*` mutation endpoints (June
+// 18-25 2026) for V2 `/portfolio/events/orders*`. The V2 request is a single-
+// book `side: bid|ask` quoted off the YES leg, with fixed-point STRING `count`
+// + dollar `price`, a required `time_in_force`, and a required
+// `self_trade_prevention_type` (SONA sends `taker_at_cross` -- issue #63 D2,
+// venue-native self-cross block). V2 create returns a LIGHTWEIGHT flat ack
+// (`order_id` + fill/remaining counts), NOT the legacy `{"order":{…}}`; the
+// full order is read back via GET `/portfolio/orders/{id}` ([`OrderAck`]).
+// ---------------------------------------------------------------------------
+
+/// Single-book order side (V2). Quoted off the YES leg: `bid` = buy YES,
+/// `ask` = sell YES. A NO order is expressed on the YES book at the
+/// complementary price: Buy NO @ q -> `ask` @ (1-q); Sell NO @ q -> `bid` @ (1-q).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum V2Side {
+    Bid,
+    Ask,
+}
+
+/// V2 `time_in_force` -- serializes to the exact Kalshi strings
+/// (`fill_or_kill` / `good_till_canceled` / `immediate_or_cancel`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeInForce {
+    FillOrKill,
+    GoodTillCanceled,
+    ImmediateOrCancel,
+}
+
+/// V2 `self_trade_prevention_type`. `taker_at_cross` cancels the incoming
+/// (taker) order if it would cross our own resting order (issue #63 D2);
+/// `maker` cancels the resting maker order instead.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfTradePreventionType {
+    TakerAtCross,
+    Maker,
+}
+
+/// V2 create-order request body (POST /portfolio/events/orders). `count` and
+/// `price` are fixed-point STRINGS per the 2026-01-28 migration; there is no
+/// `type` field and no `outcome_side` (the YES/NO leg is encoded in `side`
+/// plus the complementary `price`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct V2CreateOrderRequest {
     pub ticker: String,
-    pub action: OrderAction,
-    pub side: OrderSide,
-    #[serde(rename = "type")]
-    pub order_type: OrderType,
-    pub count: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub yes_price: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub no_price: Option<i64>,
+    pub side: V2Side,
+    /// Fixed-point contract-count string, e.g. `"10.00"`.
+    pub count: String,
+    /// Fixed-point US-dollar price string, e.g. `"0.5600"`.
+    pub price: String,
+    pub time_in_force: TimeInForce,
+    pub self_trade_prevention_type: SelfTradePreventionType,
+    /// REQUIRED by the V2 contract — Kalshi's idempotency / dedup key. Never
+    /// omit it (an omitted key risks a duplicate live order).
     pub client_order_id: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OrderAction {
-    Buy,
-    Sell,
+/// V2 create-order response -- a LIGHTWEIGHT flat ack (NOT the legacy
+/// `{"order":{…}}`). Only `order_id` is guaranteed; the rest track fill state.
+/// SONA hashes `order_id` into the witness receipt; the full order is read
+/// back via [`crate::rest::RestClient::get_order`] when the resting state is
+/// needed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct V2OrderResponse {
+    pub order_id: String,
+    pub client_order_id: Option<String>,
+    pub fill_count: Option<String>,
+    pub remaining_count: Option<String>,
+    pub average_fill_price: Option<String>,
+    pub average_fee_paid: Option<String>,
+    pub ts_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+/// Kalshi binary-market contract side (YES/NO) -- the *leg* a SONA strategy
+/// trades, orthogonal to the buy/sell action. Drives the [`V2Side`] + price
+/// mapping in [`crate::strategy_adapter::intent_to_order`]; not itself a V2
+/// wire field.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OrderSide {
     Yes,
     No,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OrderType {
-    Limit,
-    Market,
-}
-
-/// Response from POST /portfolio/orders.
+/// Full order object wrapped as `{"order": {…}}` -- the response of the GET
+/// `/portfolio/orders/{order_id}` read-back (V2 cancel/amend acks no longer
+/// echo the order), and the shape the paper simulator synthesizes.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OrderAck {
     pub order: OrderRecord,
 }
 
-/// Amend-order body. Either price or count may change; omit what you
-/// don't want to alter.
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct AmendOrder {
+/// V2 amend-order request body (POST /portfolio/events/orders/{id}/amend).
+/// V2 amend is a full re-specification (ticker + side + price + count), not a
+/// delta. Not yet wired into the SONA order path (fork-level only).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct V2AmendOrder {
+    pub ticker: String,
+    pub side: V2Side,
+    pub price: String,
+    pub count: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub yes_price: Option<i64>,
+    pub client_order_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub no_price: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub count: Option<i64>,
+    pub updated_client_order_id: Option<String>,
 }
 
-/// Response from DELETE /portfolio/orders/{id}.
-#[derive(Debug, Clone, Deserialize)]
-pub struct CancelResponse {
-    pub order: OrderRecord,
+/// V2 cancel ack (DELETE /portfolio/events/orders/{id}) -- lightweight; does
+/// NOT echo the order (SONA reads the resulting state back via `get_order`).
+/// All fields optional for forward-compatible decode.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct V2CancelAck {
+    pub order_id: Option<String>,
+    pub client_order_id: Option<String>,
+    pub reduced_by: Option<String>,
+    pub ts_ms: Option<i64>,
+}
+
+/// V2 amend ack (POST /portfolio/events/orders/{id}/amend) -- lightweight;
+/// does NOT echo the order. All fields optional for forward-compatible decode.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct V2AmendAck {
+    pub order_id: Option<String>,
+    pub client_order_id: Option<String>,
+    pub remaining_count: Option<String>,
+    pub fill_count: Option<String>,
+    pub average_fill_price: Option<String>,
+    pub average_fee_paid: Option<String>,
+    pub ts_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -409,23 +499,84 @@ mod tests {
     }
 
     #[test]
-    fn new_order_limit_serializes() {
-        let o = NewOrder {
-            ticker: "X".into(),
-            action: OrderAction::Buy,
-            side: OrderSide::Yes,
-            order_type: OrderType::Limit,
-            count: 10,
-            yes_price: Some(24),
-            no_price: None,
+    fn v2_create_order_request_serializes_to_the_wire_shape() {
+        let o = V2CreateOrderRequest {
+            ticker: "KXMLBGAME-X".into(),
+            side: V2Side::Bid,
+            count: contracts_to_count_fp(10),
+            price: cents_to_dollars_str(56),
+            time_in_force: TimeInForce::GoodTillCanceled,
+            self_trade_prevention_type: SelfTradePreventionType::TakerAtCross,
             client_order_id: "abc".into(),
         };
         let s = serde_json::to_string(&o).unwrap();
-        assert!(s.contains("\"type\":\"limit\""));
-        assert!(s.contains("\"action\":\"buy\""));
-        assert!(s.contains("\"yes_price\":24"));
-        // None field must be omitted.
-        assert!(!s.contains("no_price"));
+        assert!(s.contains("\"side\":\"bid\""), "{s}");
+        assert!(s.contains("\"count\":\"10.00\""), "{s}");
+        assert!(s.contains("\"price\":\"0.56\""), "{s}");
+        assert!(s.contains("\"time_in_force\":\"good_till_canceled\""), "{s}");
+        assert!(
+            s.contains("\"self_trade_prevention_type\":\"taker_at_cross\""),
+            "{s}"
+        );
+        assert!(s.contains("\"client_order_id\":\"abc\""), "{s}");
+        // No legacy fields leak onto the V2 wire.
+        assert!(!s.contains("\"action\""), "{s}");
+        assert!(!s.contains("\"type\""), "{s}");
+        assert!(!s.contains("yes_price"), "{s}");
+    }
+
+    #[test]
+    fn v2_create_order_request_ask_ioc_serializes() {
+        let o = V2CreateOrderRequest {
+            ticker: "T".into(),
+            side: V2Side::Ask,
+            count: contracts_to_count_fp(1),
+            price: cents_to_dollars_str(4),
+            time_in_force: TimeInForce::ImmediateOrCancel,
+            self_trade_prevention_type: SelfTradePreventionType::TakerAtCross,
+            client_order_id: "cli-2".into(),
+        };
+        let s = serde_json::to_string(&o).unwrap();
+        assert!(s.contains("\"side\":\"ask\""), "{s}");
+        assert!(s.contains("\"price\":\"0.04\""), "{s}");
+        assert!(s.contains("\"time_in_force\":\"immediate_or_cancel\""), "{s}");
+        // client_order_id is REQUIRED by the V2 contract — always serialized.
+        assert!(s.contains("\"client_order_id\":\"cli-2\""), "{s}");
+    }
+
+    #[test]
+    fn fixed_point_encoders_match_kalshi_examples_and_round_trip() {
+        assert_eq!(cents_to_dollars_str(56), "0.56");
+        assert_eq!(cents_to_dollars_str(4), "0.04");
+        assert_eq!(cents_to_dollars_str(100), "1.00");
+        assert_eq!(cents_to_dollars_str(0), "0.00");
+        // out-of-band cents clamp to the binary-contract range.
+        assert_eq!(cents_to_dollars_str(-5), "0.00");
+        assert_eq!(cents_to_dollars_str(250), "1.00");
+        // round-trip through the existing parsers.
+        assert_eq!(dollars_str_to_cents(&cents_to_dollars_str(52)), Some(52));
+        assert_eq!(contracts_to_count_fp(1), "1.00");
+        assert_eq!(contracts_to_count_fp(10), "10.00");
+        assert_eq!(count_fp_str_to_contracts(&contracts_to_count_fp(7)), Some(7));
+    }
+
+    #[test]
+    fn v2_order_response_decodes_lightweight_create_ack() {
+        // The V2 create response is FLAT — no `order` wrapper, unlike legacy.
+        let json = r#"{"order_id":"abc-123","fill_count":"0.00","remaining_count":"1.00","ts_ms":1750000000000}"#;
+        let resp: V2OrderResponse = serde_json::from_str(json).expect("v2 create ack decodes");
+        assert_eq!(resp.order_id, "abc-123");
+        assert_eq!(resp.remaining_count.as_deref(), Some("1.00"));
+    }
+
+    #[test]
+    fn v2_cancel_ack_decodes_lightweight_and_empty() {
+        let full: V2CancelAck =
+            serde_json::from_str(r#"{"order_id":"o-1","reduced_by":"1.00","ts_ms":1}"#).unwrap();
+        assert_eq!(full.order_id.as_deref(), Some("o-1"));
+        // A forward-compat / empty body still decodes (all fields optional).
+        let empty: V2CancelAck = serde_json::from_str("{}").unwrap();
+        assert!(empty.order_id.is_none());
     }
 }
 

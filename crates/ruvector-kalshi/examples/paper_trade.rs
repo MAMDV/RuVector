@@ -17,7 +17,7 @@
 //!      │  cash / position / concentration / daily-loss / live-flag
 //!      ▼
 //!   intent_to_order                  (ruvector-kalshi::strategy_adapter)
-//!      │  produces NewOrder (not sent; KALSHI_ENABLE_LIVE off)
+//!      │  produces V2CreateOrderRequest (not sent; KALSHI_ENABLE_LIVE off)
 //!      ▼
 //!   ReservoirStore + InMemoryReceiptLog (neural-trader-replay)
 //!      │  append ReplaySegment per event window + WitnessReceipt per fill
@@ -292,21 +292,21 @@ async fn main() -> anyhow::Result<()> {
                     let client_id = format!("paper-{idx}-{approved_count}");
                     let order = intent_to_order(out_ticker, &approved, client_id);
                     println!(
-                        "frame[{idx}] APPROVE {} {:?} {} @ {}¢ ({}bps) → NewOrder {}",
+                        "frame[{idx}] APPROVE {} {:?} {} @ {}¢ ({}bps) → V2 order {}",
                         approved.strategy,
                         approved.side,
                         approved.quantity,
                         approved.limit_price_cents,
                         approved.edge_bps,
-                        order.client_order_id,
+                        &order.client_order_id,
                     );
-                    let cost = order.count.saturating_mul(approved.limit_price_cents);
+                    let cost = approved.quantity.saturating_mul(approved.limit_price_cents);
                     portfolio.cash_cents = portfolio.cash_cents.saturating_sub(cost);
                     portfolio
                         .positions
                         .entry(approved.symbol_id)
                         .and_modify(|p: &mut Position| {
-                            let new_qty = p.quantity.saturating_add(order.count);
+                            let new_qty = p.quantity.saturating_add(approved.quantity);
                             let new_cost = p
                                 .quantity
                                 .saturating_mul(p.avg_price_cents)
@@ -316,10 +316,10 @@ async fn main() -> anyhow::Result<()> {
                         })
                         .or_insert(Position {
                             symbol_id: approved.symbol_id,
-                            quantity: order.count,
+                            quantity: approved.quantity,
                             avg_price_cents: approved.limit_price_cents,
                         });
-                    fills.push((out_ticker.into(), approved.limit_price_cents, order.count));
+                    fills.push((out_ticker.into(), approved.limit_price_cents, approved.quantity));
 
                     // --- Witness receipt (audit trail) ---
                     receipts.append_receipt(WitnessReceipt {
@@ -342,7 +342,7 @@ async fn main() -> anyhow::Result<()> {
                     // strategy behavior across runs. Real resolutions
                     // would use Resolution::Yes/No with actual P&L.
                     if let Some(brain) = brain.as_ref() {
-                        let notional = order.count.saturating_mul(approved.limit_price_cents);
+                        let notional = approved.quantity.saturating_mul(approved.limit_price_cents);
                         let memory = SharedMemory::market_resolution(
                             out_ticker,
                             Resolution::Void, // paper → void until real settlement
