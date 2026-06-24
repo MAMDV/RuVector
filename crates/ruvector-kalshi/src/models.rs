@@ -563,7 +563,28 @@ pub struct WsFill {
     pub no_price: Option<i64>,
     pub count: i64,
     pub side: String,
+    /// DEPRECATED Unix timestamp in SECONDS (Kalshi `ts`). Prefer [`Self::ts_ms`];
+    /// kept for backward-compat. Treating this as milliseconds is a 1000× trap.
     pub ts: Option<i64>,
+    /// True per-fill identity — the Kalshi WS `trade_id` (a UUID). The SONA fill
+    /// consumer maps this to `TradeFill.venue_fill_id`, the dedup key (SONA
+    /// migration 0019, issue #55 item 9 Prereq A). NOT `order_id`: two partial
+    /// fills of one order share an `order_id` but carry distinct `trade_id`s, so
+    /// keying dedup on `order_id` would wrongly collapse legitimate partial
+    /// fills. Context7-verified against the Kalshi WS user-fills schema 2026-06-24.
+    pub trade_id: Option<String>,
+    /// Unix timestamp in MILLISECONDS (Kalshi `ts_ms`, the non-deprecated field).
+    /// issue #55 item 9 Prereq B.
+    pub ts_ms: Option<i64>,
+    /// Post-fill net position as a fixed-point string (Kalshi `post_position_fp`)
+    /// — the accumulation-error cross-check the (deferred) fill consumer
+    /// reconciles its running position against. issue #55 item 9 Prereq B.
+    pub post_position_fp: Option<String>,
+    // NOTE (Context7 2026-06-24): the live Kalshi WS `fill` message ALSO carries
+    // `count_fp`/`yes_price_dollars`/`fee_cost` as fixed-point STRINGS (this
+    // struct still models the legacy `count`/`yes_price` integers). Full wire
+    // conformance is deferred to the WS-consumer wiring (SONA #55 Phase B); this
+    // patch adds only the timestamp/identity/position fields the dedup rail needs.
 }
 
 #[cfg(test)]
@@ -600,6 +621,64 @@ mod tests {
         let env: WsEnvelope = serde_json::from_str(json).unwrap();
         let msg = WsMessage::from_envelope(env).unwrap();
         assert!(matches!(msg, WsMessage::Other));
+    }
+
+    #[test]
+    fn ws_fill_parses_trade_id_ts_ms_and_post_position_fp() {
+        // SONA issue #55 item 9 Prereq B: the fill carries `trade_id` (the
+        // per-fill dedup identity), `ts_ms` (milliseconds — the non-deprecated
+        // timestamp), and `post_position_fp` (post-fill net position). Decoded
+        // through the real WsEnvelope → from_envelope path. The legacy
+        // `yes_price`/`count` integers are present because THIS struct still
+        // models them (the live message sends `yes_price_dollars`/`count_fp`
+        // strings — full wire conformance is deferred to the #55 Phase B
+        // consumer; see the WsFill note). Field values mirror the Context7-
+        // verified Kalshi user-fills example (2026-06-24).
+        let json = r#"{
+            "type":"fill",
+            "msg":{
+                "market_ticker":"HIGHNY-22DEC23-B53.5",
+                "order_id":"ee587a1c-8b87-4dcf-b721-9f6f790619fa",
+                "yes_price":75,
+                "count":278,
+                "side":"yes",
+                "trade_id":"d91bc706-ee49-470d-82d8-11418bda6fed",
+                "ts":1671899397,
+                "ts_ms":1671899397000,
+                "post_position_fp":"500.00"
+            }
+        }"#;
+        let env: WsEnvelope = serde_json::from_str(json).unwrap();
+        let WsMessage::Fill(f) = WsMessage::from_envelope(env).unwrap() else {
+            panic!("expected WsMessage::Fill");
+        };
+        assert_eq!(
+            f.trade_id.as_deref(),
+            Some("d91bc706-ee49-470d-82d8-11418bda6fed"),
+            "trade_id is the per-fill dedup identity (NOT order_id)"
+        );
+        assert_eq!(f.ts_ms, Some(1_671_899_397_000), "ts_ms is milliseconds");
+        assert_eq!(
+            f.ts,
+            Some(1_671_899_397),
+            "ts is retained for backward-compat (deprecated seconds)"
+        );
+        assert_eq!(f.post_position_fp.as_deref(), Some("500.00"));
+    }
+
+    #[test]
+    fn ws_fill_legacy_frame_without_new_fields_still_decodes() {
+        // Backward-compat: a frame lacking the new Optional fields still decodes
+        // (serde defaults absent Option fields to None) — so the addition is
+        // non-breaking for any existing producer/test.
+        let json = r#"{"type":"fill","msg":{"market_ticker":"X","order_id":"o","count":1,"side":"yes"}}"#;
+        let env: WsEnvelope = serde_json::from_str(json).unwrap();
+        let WsMessage::Fill(f) = WsMessage::from_envelope(env).unwrap() else {
+            panic!("expected WsMessage::Fill");
+        };
+        assert!(f.trade_id.is_none());
+        assert!(f.ts_ms.is_none());
+        assert!(f.post_position_fp.is_none());
     }
 
     #[test]
