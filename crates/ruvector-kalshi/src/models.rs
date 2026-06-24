@@ -377,6 +377,110 @@ impl OrderRecord {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Portfolio read DTOs (issue #55 items 7-8). Context7-verified against the live
+// Kalshi V2 OpenAPI spec (docs.kalshi.com/openapi.yaml, retrieved 2026-06-23):
+//   * GET /portfolio/balance — `balance` + `portfolio_value` are INTEGER CENTS
+//     (int64), with a `balance_dollars` fixed-point mirror.
+//   * GET /portfolio/positions — `market_positions[]` with a fixed-point
+//     `position_fp` count string and `*_dollars` money strings.
+//   * GET /portfolio/fills — `fills[]` whose timestamp field is `ts` (int64),
+//     NOT `ts_ms`, and whose direction is the canonical `outcome_side`/
+//     `book_side` (the legacy `side`/`action` are deprecated). Counts are
+//     fixed-point strings, money is dollar strings.
+// These are READS — not gated on `KALSHI_ENABLE_LIVE`. SONA converts at the
+// crate boundary via the helpers above (`dollars_str_to_cents` /
+// `count_fp_str_to_contracts`); only the fields SONA consumes are declared
+// (deny_unknown_fields is OFF, so extra payload — `event_positions`,
+// `balance_breakdown`, the deprecated mirror fields — is ignored, not an error).
+// ---------------------------------------------------------------------------
+
+/// GET /portfolio/balance. `balance` and `portfolio_value` are integer cents
+/// (Kalshi keeps these int64-cents even post the 2026-01-28 fixed-point
+/// migration); `balance_dollars` is the fixed-point mirror. SONA's pre-flight
+/// gate reads `balance` (cents) directly — no string parse on the hot path.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BalanceResponse {
+    /// Member's available balance in integer cents.
+    pub balance: i64,
+    /// Fixed-point dollar mirror of `balance` (e.g. `"1000.00"`); informational.
+    pub balance_dollars: Option<String>,
+    /// Portfolio value (all positions) in integer cents.
+    pub portfolio_value: i64,
+    /// Unix timestamp of the last balance update.
+    pub updated_ts: Option<i64>,
+}
+
+/// A single market position (GET /portfolio/positions → `market_positions[]`).
+/// `position_fp` is a SIGNED fixed-point contract count (`"10.00"` long,
+/// `"-3.00"` short); money fields are dollar strings. Parse at the SONA
+/// boundary via [`count_fp_str_to_contracts`] / [`dollars_str_to_cents`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct MarketPosition {
+    pub ticker: String,
+    /// Signed fixed-point net contract count, e.g. `"10.00"` / `"-3.00"`.
+    pub position_fp: Option<String>,
+    pub market_exposure_dollars: Option<String>,
+    pub total_traded_dollars: Option<String>,
+    pub realized_pnl_dollars: Option<String>,
+    pub fees_paid_dollars: Option<String>,
+    pub last_updated_ts: Option<String>,
+}
+
+impl MarketPosition {
+    /// Net signed contract count parsed from `position_fp` (whole contracts;
+    /// the fractional `.NN` is truncated, matching [`count_fp_str_to_contracts`]).
+    /// Returns 0 when `position_fp` is absent or unparseable.
+    pub fn position_contracts(&self) -> i64 {
+        self.position_fp
+            .as_deref()
+            .and_then(count_fp_str_to_contracts)
+            .unwrap_or(0)
+    }
+}
+
+/// GET /portfolio/positions envelope. SONA consumes `market_positions` for
+/// ramp-state reconciliation; the spec's `event_positions` array is ignored
+/// (forward-compat decode). `cursor` is empty-string when there is no next page.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PositionsResponse {
+    pub market_positions: Vec<MarketPosition>,
+    pub cursor: Option<String>,
+}
+
+/// A single fill (GET /portfolio/fills → `fills[]`). Context7-verified: the
+/// timestamp field is `ts` (int64 Unix seconds), NOT `ts_ms` (the issue draft
+/// was stale); direction is the canonical `outcome_side` (yes|no) /
+/// `book_side` (bid|ask) — the legacy `side`/`action` are deprecated. Counts
+/// are fixed-point strings, prices/fees are dollar strings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RestFill {
+    pub fill_id: String,
+    pub order_id: String,
+    pub ticker: String,
+    /// Fixed-point contract count for this fill, e.g. `"1.00"`.
+    pub count_fp: Option<String>,
+    pub yes_price_dollars: Option<String>,
+    pub no_price_dollars: Option<String>,
+    /// Canonical fill direction (`"yes"`|`"no"`) — replaces the deprecated `side`.
+    pub outcome_side: Option<String>,
+    /// Canonical book side (`"bid"`|`"ask"`).
+    pub book_side: Option<String>,
+    pub is_taker: Option<bool>,
+    pub fee_cost: Option<String>,
+    pub created_time: Option<String>,
+    /// Unix timestamp (legacy field name `ts`, int64 seconds) — NOT `ts_ms`.
+    pub ts: Option<i64>,
+}
+
+/// GET /portfolio/fills envelope. `cursor` is empty-string when there is no
+/// next page.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FillsResponse {
+    pub fills: Vec<RestFill>,
+    pub cursor: Option<String>,
+}
+
 /// Raw Kalshi WS envelope. `{"type": "...", "msg": {...}}`. `msg` is
 /// kept as a `Value` so unknown `type` tags don't fail the parse — the
 /// decoder routes on `msg_type`.
@@ -690,5 +794,123 @@ mod conformance_2026_01_28 {
         assert_eq!(m.yes_bid_cents(), Some(52)); // real value via dollar string
         assert_eq!(m.last_price_cents(), Some(0));
         assert_eq!(m.no_bid_cents(), None); // neither field present
+    }
+}
+
+/// Portfolio-read wire-conformance fixtures (issue #55 items 7-8). Shapes
+/// Context7-verified against the live Kalshi V2 OpenAPI spec
+/// (`docs.kalshi.com/openapi.yaml`, retrieved 2026-06-23) — NOT hand-drafted
+/// from the issue body (whose portfolio shapes predated the fixed-point
+/// migration and used `ts_ms`/`side` rather than the live `ts`/`outcome_side`).
+/// These guard the next silent wire drift on the portfolio read path.
+#[cfg(test)]
+mod conformance_portfolio_2026_06_23 {
+    use super::*;
+
+    /// GET /portfolio/balance — `balance`/`portfolio_value` are integer cents;
+    /// `balance_dollars` is the fixed-point mirror; `balance_breakdown` is
+    /// extra payload ignored by the forward-compat decode.
+    #[test]
+    fn balance_response_decodes_integer_cents() {
+        let json = r#"{
+            "balance": 100000,
+            "balance_dollars": "1000.00",
+            "portfolio_value": 150000,
+            "updated_ts": 1678886400,
+            "balance_breakdown": [{"exchange_index": 0, "balance": "500.00"}]
+        }"#;
+        let r: BalanceResponse = serde_json::from_str(json).expect("balance must decode");
+        // SONA's pre-flight gate reads `balance` (cents) directly.
+        assert_eq!(r.balance, 100000);
+        assert_eq!(r.portfolio_value, 150000);
+        assert_eq!(r.balance_dollars.as_deref(), Some("1000.00"));
+        assert_eq!(r.updated_ts, Some(1678886400));
+    }
+
+    /// GET /portfolio/positions — fixed-point `position_fp` + `*_dollars`
+    /// money; the spec's `event_positions` array is ignored; empty `cursor`
+    /// means no next page.
+    #[test]
+    fn positions_response_decodes_fixed_point_and_ignores_event_positions() {
+        let json = r#"{
+            "market_positions": [{
+                "ticker": "KXMLBGAME-26JUN23DETHOU-HOU",
+                "position_fp": "10.00",
+                "market_exposure_dollars": "5.2000",
+                "total_traded_dollars": "5.2000",
+                "realized_pnl_dollars": "0.0000",
+                "resting_orders_count": 0,
+                "fees_paid_dollars": "0.0700",
+                "last_updated_ts": "2026-06-23T18:00:00Z"
+            }],
+            "event_positions": [],
+            "cursor": ""
+        }"#;
+        let r: PositionsResponse = serde_json::from_str(json).expect("positions must decode");
+        assert_eq!(r.market_positions.len(), 1);
+        let p = &r.market_positions[0];
+        assert_eq!(p.ticker, "KXMLBGAME-26JUN23DETHOU-HOU");
+        // Net contract count parsed from the fixed-point string.
+        assert_eq!(p.position_contracts(), 10);
+        assert_eq!(p.total_traded_dollars.as_deref(), Some("5.2000"));
+        // Empty cursor → no next page (decodes to Some("")).
+        assert_eq!(r.cursor.as_deref(), Some(""));
+    }
+
+    /// A short (negative) position decodes with a signed `position_fp`.
+    #[test]
+    fn market_position_short_is_signed() {
+        let json = r#"{"ticker":"T","position_fp":"-3.00"}"#;
+        let p: MarketPosition = serde_json::from_str(json).expect("short position decodes");
+        assert_eq!(p.position_contracts(), -3);
+        // Absent position_fp → 0 (forward-compat).
+        let empty: MarketPosition = serde_json::from_str(r#"{"ticker":"T"}"#).unwrap();
+        assert_eq!(empty.position_contracts(), 0);
+    }
+
+    /// GET /portfolio/fills — the timestamp field is `ts` (int64), NOT `ts_ms`;
+    /// direction is the canonical `outcome_side`/`book_side`. This is the exact
+    /// drift the issue's hand-drafted `RestFill` would have introduced.
+    #[test]
+    fn fills_response_decodes_with_ts_not_ts_ms_and_canonical_direction() {
+        let json = r#"{
+            "fills": [{
+                "fill_id": "f-1",
+                "trade_id": "f-1",
+                "order_id": "o-1",
+                "ticker": "KXMLBGAME-26JUN23DETHOU-HOU",
+                "market_ticker": "KXMLBGAME-26JUN23DETHOU-HOU",
+                "side": "yes",
+                "action": "buy",
+                "outcome_side": "yes",
+                "book_side": "bid",
+                "count_fp": "1.00",
+                "yes_price_dollars": "0.5200",
+                "no_price_dollars": "0.4800",
+                "is_taker": true,
+                "fee_cost": "0.0100",
+                "created_time": "2026-06-23T18:00:00Z",
+                "ts": 1678886400
+            }],
+            "cursor": ""
+        }"#;
+        let r: FillsResponse = serde_json::from_str(json).expect("fills must decode");
+        assert_eq!(r.fills.len(), 1);
+        let f = &r.fills[0];
+        assert_eq!(f.fill_id, "f-1");
+        assert_eq!(f.order_id, "o-1");
+        // Count via the fixed-point parser.
+        assert_eq!(count_fp_str_to_contracts(f.count_fp.as_deref().unwrap()), Some(1));
+        // Price via the dollar-string parser.
+        assert_eq!(
+            dollars_str_to_cents(f.yes_price_dollars.as_deref().unwrap()),
+            Some(52)
+        );
+        // The canonical direction fields are populated (NOT the deprecated ones).
+        assert_eq!(f.outcome_side.as_deref(), Some("yes"));
+        assert_eq!(f.book_side.as_deref(), Some("bid"));
+        assert_eq!(f.is_taker, Some(true));
+        // The timestamp is `ts` (NOT `ts_ms`) — the field name the issue got wrong.
+        assert_eq!(f.ts, Some(1678886400));
     }
 }

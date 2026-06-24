@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 use crate::auth::Signer;
 use crate::models::{
-    Market, MarketsResponse, OrderAck, OrderbookResponse, OrderbookSnapshot, V2AmendAck,
-    V2AmendOrder, V2CancelAck, V2CreateOrderRequest, V2OrderResponse,
+    BalanceResponse, FillsResponse, Market, MarketsResponse, OrderAck, OrderbookResponse,
+    OrderbookSnapshot, PositionsResponse, V2AmendAck, V2AmendOrder, V2CancelAck,
+    V2CreateOrderRequest, V2OrderResponse,
 };
 use crate::rate_limit::RateLimiter;
 use crate::{KalshiError, Result};
@@ -171,6 +172,50 @@ impl RestClient {
     /// echoes the order.
     pub async fn get_order(&self, order_id: &str) -> Result<OrderAck> {
         let path = format!("/portfolio/orders/{order_id}");
+        self.send(reqwest::Method::GET, &path, NO_BODY).await
+    }
+
+    /// Read the member's balance + portfolio value (GET /portfolio/balance).
+    /// READ — deliberately NOT gated on `KALSHI_ENABLE_LIVE` (only money-moving
+    /// calls are). `balance` / `portfolio_value` are integer cents (issue #55
+    /// item 7). Used by the SONA pre-flight balance gate.
+    pub async fn get_balance(&self) -> Result<BalanceResponse> {
+        self.send(reqwest::Method::GET, "/portfolio/balance", NO_BODY)
+            .await
+    }
+
+    /// Read the member's market positions (GET /portfolio/positions). READ —
+    /// not gated. Pass `ticker` to scope to one market (the ramp-reconciliation
+    /// path scopes to the traded ticker). First page only — the caller inspects
+    /// the response `cursor` to detect truncation (issue #55 item 7).
+    pub async fn get_positions(&self, ticker: Option<&str>) -> Result<PositionsResponse> {
+        let path = match ticker {
+            Some(t) => format!("/portfolio/positions?ticker={t}"),
+            None => "/portfolio/positions".into(),
+        };
+        self.send(reqwest::Method::GET, &path, NO_BODY).await
+    }
+
+    /// Read the member's fills (GET /portfolio/fills). READ — not gated. Scope
+    /// by `ticker` and/or `order_id` (gap-fill on reconnect / audit
+    /// reconciliation). First page only (issue #55 item 7).
+    pub async fn get_fills(
+        &self,
+        ticker: Option<&str>,
+        order_id: Option<&str>,
+    ) -> Result<FillsResponse> {
+        let mut params: Vec<String> = Vec::new();
+        if let Some(t) = ticker {
+            params.push(format!("ticker={t}"));
+        }
+        if let Some(o) = order_id {
+            params.push(format!("order_id={o}"));
+        }
+        let path = if params.is_empty() {
+            "/portfolio/fills".to_string()
+        } else {
+            format!("/portfolio/fills?{}", params.join("&"))
+        };
         self.send(reqwest::Method::GET, &path, NO_BODY).await
     }
 }
