@@ -162,7 +162,9 @@ pub fn ws_ticker_to_event(t: &WsTicker, seq: u64) -> MarketEvent {
     };
     MarketEvent {
         event_id: empty_event_id(),
-        ts_exchange_ns: ms_to_ns(t.ts),
+        // Prefer the millisecond `ts_ms`; fall back to the deprecated `ts`
+        // (SECONDS → ms via ×1000). Reading `ts` as ms is the 1000× trap.
+        ts_exchange_ns: ms_to_ns(t.ts_ms.or(t.ts.map(|s| s.saturating_mul(1000)))),
         ts_ingest_ns: now_ns(),
         venue_id: KALSHI_VENUE_ID,
         symbol_id: symbol_id_for(&t.market_ticker),
@@ -185,7 +187,8 @@ pub fn ws_trade_to_event(t: &WsTrade, seq: u64) -> MarketEvent {
     };
     MarketEvent {
         event_id: empty_event_id(),
-        ts_exchange_ns: ms_to_ns(t.ts),
+        // Prefer `ts_ms`; fall back to deprecated `ts` SECONDS (×1000).
+        ts_exchange_ns: ms_to_ns(t.ts_ms.or(t.ts.map(|s| s.saturating_mul(1000)))),
         ts_ingest_ns: now_ns(),
         venue_id: KALSHI_VENUE_ID,
         symbol_id: symbol_id_for(&t.market_ticker),
@@ -201,7 +204,8 @@ pub fn ws_trade_to_event(t: &WsTrade, seq: u64) -> MarketEvent {
 }
 
 pub fn ws_orderbook_to_events(ob: &WsOrderbook, starting_seq: u64) -> Vec<MarketEvent> {
-    let ts_ns = ms_to_ns(ob.ts);
+    // Prefer `ts_ms`; fall back to deprecated `ts` SECONDS (×1000).
+    let ts_ns = ms_to_ns(ob.ts_ms.or(ob.ts.map(|s| s.saturating_mul(1000))));
     orderbook_to_events(
         &ob.market_ticker,
         ts_ns,
@@ -226,7 +230,9 @@ pub fn ws_orderbook_delta_to_event(d: &WsOrderbookDelta, seq: u64) -> MarketEven
     };
     MarketEvent {
         event_id: empty_event_id(),
-        ts_exchange_ns: ms_to_ns(d.ts),
+        // The delta frame's only integer timestamp is `ts_ms` (its `ts` is an
+        // RFC3339 string, dropped from the DTO).
+        ts_exchange_ns: ms_to_ns(d.ts_ms),
         ts_ingest_ns: now_ns(),
         venue_id: KALSHI_VENUE_ID,
         symbol_id: symbol_id_for(&d.market_ticker),
@@ -249,7 +255,8 @@ pub fn ws_fill_to_event(f: &WsFill, seq: u64) -> MarketEvent {
     };
     MarketEvent {
         event_id: event_id_from_str(&f.order_id),
-        ts_exchange_ns: ms_to_ns(f.ts),
+        // Prefer `ts_ms`; fall back to deprecated `ts` SECONDS (×1000).
+        ts_exchange_ns: ms_to_ns(f.ts_ms.or(f.ts.map(|s| s.saturating_mul(1000)))),
         ts_ingest_ns: now_ns(),
         venue_id: KALSHI_VENUE_ID,
         symbol_id: symbol_id_for(&f.market_ticker),
@@ -326,14 +333,14 @@ mod tests {
             side: "yes".into(),
             price: 24,
             delta: 5,
-            ts: Some(1_700_000_000_000),
+            ts_ms: Some(1_700_000_000_000),
         };
         let remove = WsOrderbookDelta {
             market_ticker: "FED-DEC23".into(),
             side: "no".into(),
             price: 76,
             delta: -3,
-            ts: None,
+            ts_ms: None,
         };
         assert_eq!(
             ws_orderbook_delta_to_event(&add, 0).event_type,

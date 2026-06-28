@@ -35,7 +35,14 @@ pub const KALSHI_VENUE_ID: u16 = 1001;
 pub const KALSHI_API_URL: &str = "https://api.elections.kalshi.com/trade-api/v2";
 
 /// Default Kalshi WebSocket URL (production).
-pub const KALSHI_WS_URL: &str = "wss://api.elections.kalshi.com/trade-api/ws/v2";
+///
+/// Kalshi lists two live prod WS hosts: the preferred dedicated WS host
+/// `external-api-ws.kalshi.com` ("for new integrations") and the still-live
+/// legacy `api.elections.kalshi.com`. Standardized on the dedicated WS host per
+/// the 2026-06-28 Context7 recon (`/websites/kalshi_websockets`). NOTE this is a
+/// DISTINCT host-class from the REST host `external-api.kalshi.com` (no `-ws`) —
+/// that REST host is not a valid WS endpoint. Override via `KALSHI_WS_URL`.
+pub const KALSHI_WS_URL: &str = "wss://external-api-ws.kalshi.com/trade-api/ws/v2";
 
 /// Kalshi fixed-point scale for price. Kalshi quotes in cents 0..=100;
 /// we upscale into the canonical `price_fp` scale (value × 1e8) so

@@ -78,16 +78,22 @@ mod tests {
 
     #[test]
     fn decodes_ticker_then_trade_monotonically() {
+        // Live wire shape (post the 2026-01-28 fixed-point migration):
+        // `*_dollars` price strings + fixed-point `count_fp`.
         let mut dec = FeedDecoder::new();
         let events = dec
-            .decode(r#"{"type":"ticker","msg":{"market_ticker":"X","yes_bid":10,"yes_ask":12}}"#)
+            .decode(
+                r#"{"type":"ticker","msg":{"market_ticker":"X","yes_bid_dollars":"0.10","yes_ask_dollars":"0.12"}}"#,
+            )
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].seq, 0);
         assert_eq!(events[0].event_type, EventType::VenueStatus);
 
         let events = dec
-            .decode(r#"{"type":"trade","msg":{"market_ticker":"X","yes_price":11,"count":3}}"#)
+            .decode(
+                r#"{"type":"trade","msg":{"market_ticker":"X","yes_price_dollars":"0.11","count_fp":"3.00"}}"#,
+            )
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].seq, 1);
@@ -96,13 +102,15 @@ mod tests {
 
     #[test]
     fn decodes_snapshot_with_multiple_levels() {
+        // Live wire shape: `yes_dollars_fp`/`no_dollars_fp` arrays of
+        // `[priceDollarsStr, countFpStr]`.
         let mut dec = FeedDecoder::new();
         let frame = r#"{
             "type":"orderbook_snapshot",
             "msg":{
                 "market_ticker":"X",
-                "yes":[[24,100],[23,200]],
-                "no":[[76,150]]
+                "yes_dollars_fp":[["0.24","100.00"],["0.23","200.00"]],
+                "no_dollars_fp":[["0.76","150.00"]]
             }
         }"#;
         let events = dec.decode(frame).unwrap();

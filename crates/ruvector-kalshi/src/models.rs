@@ -83,6 +83,50 @@ where
     Ok(out)
 }
 
+/// Deserialize an OPTIONAL Kalshi dollar-string price (e.g. `"0.750"`) into
+/// `Option<i64>` integer cents via [`dollars_str_to_cents`]. A JSON `null` →
+/// `None`; a present string → `Some(cents)`; an unparseable string is a HARD
+/// decode error — a malformed price must never silently become `None` on the
+/// money path. Pair the field with `#[serde(default)]` so an ABSENT key is
+/// `None` without invoking this fn (serde only calls a `deserialize_with` for a
+/// present field).
+fn de_opt_dollars_cents<'de, D>(d: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(d)?;
+    match opt {
+        None => Ok(None),
+        Some(s) => dollars_str_to_cents(&s).map(Some).ok_or_else(|| {
+            <D::Error as serde::de::Error>::custom(format!("unparseable price {s:?}"))
+        }),
+    }
+}
+
+/// Deserialize a REQUIRED Kalshi dollar-string price into integer cents via
+/// [`dollars_str_to_cents`]. Unparseable input is a hard decode error.
+fn de_dollars_cents<'de, D>(d: D) -> Result<i64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    dollars_str_to_cents(&s)
+        .ok_or_else(|| <D::Error as serde::de::Error>::custom(format!("unparseable price {s:?}")))
+}
+
+/// Deserialize a Kalshi fixed-point count string (`"278.00"`, or a SIGNED
+/// `"-54.00"` for an orderbook delta) into an integer contract count via
+/// [`count_fp_str_to_contracts`] (which retains the leading sign). Unparseable
+/// input is a hard decode error.
+fn de_count_fp_i64<'de, D>(d: D) -> Result<i64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    count_fp_str_to_contracts(&s)
+        .ok_or_else(|| <D::Error as serde::de::Error>::custom(format!("unparseable count {s:?}")))
+}
+
 /// Market metadata (GET /markets, /markets/{ticker}).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Market {
@@ -519,48 +563,148 @@ impl WsMessage {
     }
 }
 
+/// WS `ticker` frame. Post the 2026-01-28 fixed-point migration the live wire
+/// carries `*_dollars` price strings + a millisecond `ts_ms`; the integer-cent
+/// Rust fields are filled by the boundary deserializers so `normalize.rs` reads
+/// unchanged. Context7-verified against `/websites/kalshi_websockets`
+/// (market-ticker, 2026-06-28).
 #[derive(Debug, Clone, Deserialize)]
 pub struct WsTicker {
     pub market_ticker: String,
+    /// Best YES bid in integer cents, from the live `yes_bid_dollars` string.
+    #[serde(
+        rename = "yes_bid_dollars",
+        deserialize_with = "de_opt_dollars_cents",
+        default
+    )]
     pub yes_bid: Option<i64>,
+    /// Best YES ask in integer cents, from the live `yes_ask_dollars` string.
+    #[serde(
+        rename = "yes_ask_dollars",
+        deserialize_with = "de_opt_dollars_cents",
+        default
+    )]
     pub yes_ask: Option<i64>,
+    /// Last-traded price in integer cents, from the live `price_dollars` string.
+    #[serde(
+        rename = "price_dollars",
+        deserialize_with = "de_opt_dollars_cents",
+        default
+    )]
     pub price: Option<i64>,
+    /// DEPRECATED Unix timestamp in SECONDS (legacy `ts`). Prefer [`Self::ts_ms`];
+    /// treating it as milliseconds is a 1000× trap. (The live ticker frame sends
+    /// only `ts_ms`; `ts` is retained for forward/backward-compat decode.)
     pub ts: Option<i64>,
+    /// Unix timestamp in MILLISECONDS (`ts_ms`, the non-deprecated field).
+    pub ts_ms: Option<i64>,
 }
 
+/// WS `trade` (public prints) frame. Live wire carries `*_dollars` prices +
+/// fixed-point `count_fp` + `ts`(sec)/`ts_ms`(ms). Context7-verified against
+/// `/websites/kalshi_websockets` (public-trades, 2026-06-28).
 #[derive(Debug, Clone, Deserialize)]
 pub struct WsTrade {
     pub market_ticker: String,
+    /// YES print price in integer cents, from the live `yes_price_dollars` string.
+    #[serde(
+        rename = "yes_price_dollars",
+        deserialize_with = "de_opt_dollars_cents",
+        default
+    )]
     pub yes_price: Option<i64>,
+    /// NO print price in integer cents, from the live `no_price_dollars` string.
+    #[serde(
+        rename = "no_price_dollars",
+        deserialize_with = "de_opt_dollars_cents",
+        default
+    )]
     pub no_price: Option<i64>,
+    /// Contracts traded, from the fixed-point `count_fp` string.
+    #[serde(rename = "count_fp", deserialize_with = "de_count_fp_i64")]
     pub count: i64,
     pub taker_side: Option<String>,
+    /// DEPRECATED Unix timestamp in SECONDS. Prefer [`Self::ts_ms`].
     pub ts: Option<i64>,
+    /// Unix timestamp in MILLISECONDS (`ts_ms`).
+    pub ts_ms: Option<i64>,
 }
 
+/// WS `orderbook_snapshot` frame. Live wire keys are `yes_dollars_fp`/
+/// `no_dollars_fp`, each `[priceDollarsStr, countFpStr]`, decoded to the
+/// internal `[price_cents, contracts]` `[i64; 2]` shape. Context7-verified
+/// against `/websites/kalshi_websockets` (orderbook-updates, 2026-06-28).
 #[derive(Debug, Clone, Deserialize)]
 pub struct WsOrderbook {
     pub market_ticker: String,
+    /// YES side `[price_cents, contracts]`, from `yes_dollars_fp`. Absent ⇒ empty.
+    #[serde(
+        rename = "yes_dollars_fp",
+        deserialize_with = "de_price_count_pairs",
+        default
+    )]
     pub yes: Vec<[i64; 2]>,
+    /// NO side `[price_cents, contracts]`, from `no_dollars_fp`. Absent ⇒ empty.
+    #[serde(
+        rename = "no_dollars_fp",
+        deserialize_with = "de_price_count_pairs",
+        default
+    )]
     pub no: Vec<[i64; 2]>,
+    /// DEPRECATED Unix timestamp in SECONDS. Prefer [`Self::ts_ms`].
     pub ts: Option<i64>,
+    /// Unix timestamp in MILLISECONDS (`ts_ms`).
+    pub ts_ms: Option<i64>,
 }
 
+/// WS `orderbook_delta` frame. Live wire carries `price_dollars` + a SIGNED
+/// fixed-point `delta_fp` (e.g. `"-54.00"`). NOTE: the live `ts` field is now an
+/// RFC3339 STRING (`"2022-11-22T20:44:01Z"`), so it is intentionally NOT modeled
+/// as `Option<i64>` (that broke the decode) — the unknown `ts` string is ignored
+/// and the millisecond `ts_ms` is the sole timestamp. Context7-verified against
+/// `/websites/kalshi_websockets` (orderbook-updates, 2026-06-28).
 #[derive(Debug, Clone, Deserialize)]
 pub struct WsOrderbookDelta {
     pub market_ticker: String,
     pub side: String, // "yes" | "no"
+    /// Level price in integer cents, from the live `price_dollars` string.
+    #[serde(rename = "price_dollars", deserialize_with = "de_dollars_cents")]
     pub price: i64,
+    /// SIGNED contract-count change, from the fixed-point `delta_fp` string.
+    #[serde(rename = "delta_fp", deserialize_with = "de_count_fp_i64")]
     pub delta: i64,
-    pub ts: Option<i64>,
+    /// Unix timestamp in MILLISECONDS (`ts_ms`); the live `ts` RFC3339 string is
+    /// ignored (see the struct note).
+    pub ts_ms: Option<i64>,
 }
 
+/// WS `fill` (own-fill) frame — the highest-stakes WS datum (realized-P&L /
+/// position reconcile against it). Live wire carries `yes_price_dollars` +
+/// fixed-point `count_fp`; prices route through the SAME `dollars_str_to_cents`
+/// the REST fill path uses. Context7-verified against `/websites/kalshi_websockets`
+/// (user-fills, 2026-06-28).
 #[derive(Debug, Clone, Deserialize)]
 pub struct WsFill {
     pub market_ticker: String,
     pub order_id: String,
+    /// YES fill price in integer cents, from the live `yes_price_dollars` string
+    /// (`"0.750"` → 75¢ — the money-path conformance anchor).
+    #[serde(
+        rename = "yes_price_dollars",
+        deserialize_with = "de_opt_dollars_cents",
+        default
+    )]
     pub yes_price: Option<i64>,
+    /// NO fill price in integer cents, from the live `no_price_dollars` string
+    /// (optional — the live fill frame usually carries only the YES leg).
+    #[serde(
+        rename = "no_price_dollars",
+        deserialize_with = "de_opt_dollars_cents",
+        default
+    )]
     pub no_price: Option<i64>,
+    /// Contracts filled, from the fixed-point `count_fp` string.
+    #[serde(rename = "count_fp", deserialize_with = "de_count_fp_i64")]
     pub count: i64,
     pub side: String,
     /// DEPRECATED Unix timestamp in SECONDS (Kalshi `ts`). Prefer [`Self::ts_ms`];
@@ -580,11 +724,12 @@ pub struct WsFill {
     /// — the accumulation-error cross-check the (deferred) fill consumer
     /// reconciles its running position against. issue #55 item 9 Prereq B.
     pub post_position_fp: Option<String>,
-    // NOTE (Context7 2026-06-24): the live Kalshi WS `fill` message ALSO carries
-    // `count_fp`/`yes_price_dollars`/`fee_cost` as fixed-point STRINGS (this
-    // struct still models the legacy `count`/`yes_price` integers). Full wire
-    // conformance is deferred to the WS-consumer wiring (SONA #55 Phase B); this
-    // patch adds only the timestamp/identity/position fields the dedup rail needs.
+    // NOTE (Context7 2026-06-28, SONA #55 Phase B): full WS wire conformance has
+    // now landed — `yes_price`/`no_price`/`count` deserialize from the live
+    // `yes_price_dollars`/`no_price_dollars`/`count_fp` fixed-point strings via
+    // the boundary helpers, so the integer-cent Rust fields downstream
+    // `normalize.rs` consumes are unchanged. `fee_cost` is still not modeled
+    // (SONA does not read it on the WS path).
 }
 
 #[cfg(test)]
@@ -609,10 +754,14 @@ mod tests {
 
     #[test]
     fn ws_message_dispatch() {
-        let json = r#"{"type":"ticker","msg":{"market_ticker":"X","yes_bid":10,"yes_ask":12}}"#;
+        // Live wire shape: `*_dollars` price strings (post the 2026-01-28
+        // fixed-point migration), decoded into the internal integer-cent fields.
+        let json = r#"{"type":"ticker","msg":{"market_ticker":"X","yes_bid_dollars":"0.10","yes_ask_dollars":"0.12"}}"#;
         let env: WsEnvelope = serde_json::from_str(json).unwrap();
         let msg = WsMessage::from_envelope(env).unwrap();
-        assert!(matches!(msg, WsMessage::Ticker(ref t) if t.market_ticker == "X"));
+        assert!(
+            matches!(msg, WsMessage::Ticker(ref t) if t.market_ticker == "X" && t.yes_bid == Some(10) && t.yes_ask == Some(12))
+        );
     }
 
     #[test]
@@ -625,22 +774,20 @@ mod tests {
 
     #[test]
     fn ws_fill_parses_trade_id_ts_ms_and_post_position_fp() {
-        // SONA issue #55 item 9 Prereq B: the fill carries `trade_id` (the
-        // per-fill dedup identity), `ts_ms` (milliseconds — the non-deprecated
-        // timestamp), and `post_position_fp` (post-fill net position). Decoded
-        // through the real WsEnvelope → from_envelope path. The legacy
-        // `yes_price`/`count` integers are present because THIS struct still
-        // models them (the live message sends `yes_price_dollars`/`count_fp`
-        // strings — full wire conformance is deferred to the #55 Phase B
-        // consumer; see the WsFill note). Field values mirror the Context7-
-        // verified Kalshi user-fills example (2026-06-24).
+        // SONA issue #55 item 9 Prereq B + Phase B conformance: the fill carries
+        // `trade_id` (the per-fill dedup identity), `ts_ms` (milliseconds — the
+        // non-deprecated timestamp), `post_position_fp` (post-fill net position),
+        // and the live `yes_price_dollars`/`count_fp` fixed-point strings now
+        // decoded into the integer-cent `yes_price` + integer `count` fields.
+        // Decoded through the real WsEnvelope → from_envelope path. Field values
+        // mirror the Context7-verified Kalshi user-fills example (2026-06-28).
         let json = r#"{
             "type":"fill",
             "msg":{
                 "market_ticker":"HIGHNY-22DEC23-B53.5",
                 "order_id":"ee587a1c-8b87-4dcf-b721-9f6f790619fa",
-                "yes_price":75,
-                "count":278,
+                "yes_price_dollars":"0.750",
+                "count_fp":"278.00",
                 "side":"yes",
                 "trade_id":"d91bc706-ee49-470d-82d8-11418bda6fed",
                 "ts":1671899397,
@@ -652,6 +799,9 @@ mod tests {
         let WsMessage::Fill(f) = WsMessage::from_envelope(env).unwrap() else {
             panic!("expected WsMessage::Fill");
         };
+        // Money-path: the dollar string parses to integer cents.
+        assert_eq!(f.yes_price, Some(75), "yes_price_dollars 0.750 → 75¢");
+        assert_eq!(f.count, 278, "count_fp 278.00 → 278 contracts");
         assert_eq!(
             f.trade_id.as_deref(),
             Some("d91bc706-ee49-470d-82d8-11418bda6fed"),
@@ -668,14 +818,17 @@ mod tests {
 
     #[test]
     fn ws_fill_legacy_frame_without_new_fields_still_decodes() {
-        // Backward-compat: a frame lacking the new Optional fields still decodes
+        // Backward-compat: a frame carrying only the required wire fields
+        // (`count_fp` + `side`) and none of the new Optional fields still decodes
         // (serde defaults absent Option fields to None) — so the addition is
         // non-breaking for any existing producer/test.
-        let json = r#"{"type":"fill","msg":{"market_ticker":"X","order_id":"o","count":1,"side":"yes"}}"#;
+        let json = r#"{"type":"fill","msg":{"market_ticker":"X","order_id":"o","count_fp":"1.00","side":"yes"}}"#;
         let env: WsEnvelope = serde_json::from_str(json).unwrap();
         let WsMessage::Fill(f) = WsMessage::from_envelope(env).unwrap() else {
             panic!("expected WsMessage::Fill");
         };
+        assert_eq!(f.count, 1);
+        assert!(f.yes_price.is_none());
         assert!(f.trade_id.is_none());
         assert!(f.ts_ms.is_none());
         assert!(f.post_position_fp.is_none());
@@ -991,5 +1144,196 @@ mod conformance_portfolio_2026_06_23 {
         assert_eq!(f.is_taker, Some(true));
         // The timestamp is `ts` (NOT `ts_ms`) — the field name the issue got wrong.
         assert_eq!(f.ts, Some(1678886400));
+    }
+}
+
+/// WebSocket wire-conformance fixtures (SONA issue #55 Phase B). The 5 live WS
+/// channel frames decoded through the real `WsEnvelope → WsMessage::from_envelope`
+/// path, asserting the integer-cent / integer-contract values the boundary
+/// deserializers fill from the live `*_dollars` / `*_fp` strings. Shapes
+/// Context7-verified against `/websites/kalshi_websockets` (ticker / public-trades
+/// / orderbook-updates / user-fills, retrieved 2026-06-28) — the recon that
+/// corrected the original audit (integer-cent DTOs would fail to deserialize the
+/// live dollar/fp strings). These guard the next silent WS wire drift.
+#[cfg(test)]
+mod conformance_ws_2026_06_28 {
+    use super::*;
+
+    fn decode(json: &str) -> WsMessage {
+        let env: WsEnvelope = serde_json::from_str(json).expect("envelope must parse");
+        WsMessage::from_envelope(env).expect("frame must decode")
+    }
+
+    /// `ticker` — `*_dollars` price strings → integer cents (with half-up
+    /// rounding on the 3rd fractional digit), `ts_ms` milliseconds.
+    #[test]
+    fn ticker_frame_decodes_dollar_prices_to_cents() {
+        let json = r#"{
+            "type":"ticker","sid":12345,
+            "msg":{
+                "market_ticker":"FED-23DEC-T3.00",
+                "market_id":"a1b2c3d4-e5f6-7890-1234-567890abcdef",
+                "price_dollars":"0.500000",
+                "yes_bid_dollars":"0.495000",
+                "yes_ask_dollars":"0.505000",
+                "volume_fp":"1500.00",
+                "ts_ms":1678886400000
+            }
+        }"#;
+        let WsMessage::Ticker(t) = decode(json) else {
+            panic!("expected Ticker");
+        };
+        assert_eq!(t.market_ticker, "FED-23DEC-T3.00");
+        assert_eq!(t.yes_bid, Some(50), "0.495000 → 50¢ (half-up)");
+        assert_eq!(t.yes_ask, Some(51), "0.505000 → 51¢ (half-up)");
+        assert_eq!(t.price, Some(50), "0.500000 → 50¢");
+        assert_eq!(t.ts_ms, Some(1678886400000));
+    }
+
+    /// `trade` — `yes_price_dollars`/`no_price_dollars` → cents, `count_fp` →
+    /// contracts, both `ts` (sec) and `ts_ms` (ms) present.
+    #[test]
+    fn trade_frame_decodes_dollar_prices_and_count_fp() {
+        let json = r#"{
+            "type":"trade","sid":11,
+            "msg":{
+                "trade_id":"d91bc706-ee49-470d-82d8-11418bda6fed",
+                "market_ticker":"HIGHNY-22DEC23-B53.5",
+                "yes_price_dollars":"0.360",
+                "no_price_dollars":"0.640",
+                "count_fp":"136.00",
+                "taker_side":"no",
+                "ts":1669149841,
+                "ts_ms":1669149841000
+            }
+        }"#;
+        let WsMessage::Trade(t) = decode(json) else {
+            panic!("expected Trade");
+        };
+        assert_eq!(t.yes_price, Some(36), "0.360 → 36¢");
+        assert_eq!(t.no_price, Some(64), "0.640 → 64¢");
+        assert_eq!(t.count, 136, "count_fp 136.00 → 136");
+        assert_eq!(t.taker_side.as_deref(), Some("no"));
+        assert_eq!(t.ts, Some(1669149841));
+        assert_eq!(t.ts_ms, Some(1669149841000));
+    }
+
+    /// `orderbook_snapshot` — `yes_dollars_fp`/`no_dollars_fp` arrays of
+    /// `[priceDollarsStr, countFpStr]` → internal `[price_cents, contracts]`.
+    #[test]
+    fn orderbook_snapshot_frame_decodes_dollar_fp_levels() {
+        let json = r#"{
+            "type":"orderbook_snapshot","sid":2,"seq":2,
+            "msg":{
+                "market_ticker":"FED-23DEC-T3.00",
+                "market_id":"9b0f6b43-5b68-4f9f-9f02-9a2d1b8ac1a1",
+                "yes_dollars_fp":[["0.0800","300.00"],["0.2200","333.00"]],
+                "no_dollars_fp":[["0.5400","20.00"],["0.5600","146.00"]]
+            }
+        }"#;
+        let WsMessage::OrderbookSnapshot(ob) = decode(json) else {
+            panic!("expected OrderbookSnapshot");
+        };
+        assert_eq!(ob.market_ticker, "FED-23DEC-T3.00");
+        assert_eq!(ob.yes, vec![[8, 300], [22, 333]]);
+        assert_eq!(ob.no, vec![[54, 20], [56, 146]]);
+        // The snapshot frame carries no timestamp — both fall back to None.
+        assert!(ob.ts_ms.is_none());
+        assert!(ob.ts.is_none());
+    }
+
+    /// `orderbook_delta` — `price_dollars` → cents, SIGNED `delta_fp` → signed
+    /// contract delta, AND the live `ts` is an RFC3339 STRING that must NOT break
+    /// the decode (the `ts` i64 field was dropped; `ts_ms` is the timestamp).
+    #[test]
+    fn orderbook_delta_frame_decodes_and_rfc3339_ts_does_not_break() {
+        let json = r#"{
+            "type":"orderbook_delta","sid":2,"seq":3,
+            "msg":{
+                "market_ticker":"FED-23DEC-T3.00",
+                "market_id":"9b0f6b43-5b68-4f9f-9f02-9a2d1b8ac1a1",
+                "price_dollars":"0.960",
+                "delta_fp":"-54.00",
+                "side":"yes",
+                "ts":"2022-11-22T20:44:01Z",
+                "ts_ms":1669149841000
+            }
+        }"#;
+        // Decoding succeeding at all is the assertion that the RFC3339 `ts`
+        // STRING does not get parsed as `Option<i64>` (it is an ignored unknown
+        // field now that the `ts` i64 field is dropped).
+        let WsMessage::OrderbookDelta(d) = decode(json) else {
+            panic!("expected OrderbookDelta");
+        };
+        assert_eq!(d.price, 96, "0.960 → 96¢");
+        assert_eq!(d.delta, -54, "delta_fp -54.00 → -54 (signed)");
+        assert_eq!(d.side, "yes");
+        assert_eq!(d.ts_ms, Some(1669149841000));
+    }
+
+    /// `fill` — THE money-path anchor: `yes_price_dollars:"0.750"` → 75¢, routed
+    /// through the SAME `dollars_str_to_cents` the REST fill path uses. A wrong
+    /// price unit here corrupts realized-P&L / position the scalp round-trip +
+    /// ramp counter reconcile against.
+    #[test]
+    fn fill_frame_decodes_yes_price_dollars_to_75_cents() {
+        let json = r#"{
+            "type":"fill","sid":13,
+            "msg":{
+                "trade_id":"d91bc706-ee49-470d-82d8-11418bda6fed",
+                "order_id":"ee587a1c-8b87-4dcf-b721-9f6f790619fa",
+                "market_ticker":"HIGHNY-22DEC23-B53.5",
+                "is_taker":true,
+                "side":"yes",
+                "yes_price_dollars":"0.750",
+                "count_fp":"278.00",
+                "action":"buy",
+                "ts":1671899397,
+                "ts_ms":1671899397000,
+                "post_position_fp":"500.00",
+                "purchased_side":"yes",
+                "subaccount":3
+            }
+        }"#;
+        let WsMessage::Fill(f) = decode(json) else {
+            panic!("expected Fill");
+        };
+        // THE highest-stakes money-path datum.
+        assert_eq!(f.yes_price, Some(75), "yes_price_dollars 0.750 → 75¢");
+        assert_eq!(f.count, 278, "count_fp 278.00 → 278 contracts");
+        assert_eq!(f.side, "yes");
+        assert_eq!(f.order_id, "ee587a1c-8b87-4dcf-b721-9f6f790619fa");
+        assert_eq!(
+            f.trade_id.as_deref(),
+            Some("d91bc706-ee49-470d-82d8-11418bda6fed")
+        );
+        assert_eq!(f.ts, Some(1671899397));
+        assert_eq!(f.ts_ms, Some(1671899397000));
+        assert_eq!(f.post_position_fp.as_deref(), Some("500.00"));
+    }
+
+    /// Backward-compat: frames missing the optional fields still decode —
+    /// a ticker with no price keys yields `None` cents; a one-sided snapshot
+    /// (only `yes_dollars_fp`, count without a decimal) yields an empty `no`.
+    #[test]
+    fn missing_optional_fields_still_decode() {
+        let WsMessage::Ticker(t) = decode(r#"{"type":"ticker","msg":{"market_ticker":"X"}}"#)
+        else {
+            panic!("expected Ticker");
+        };
+        assert_eq!(t.market_ticker, "X");
+        assert!(t.yes_bid.is_none());
+        assert!(t.yes_ask.is_none());
+        assert!(t.price.is_none());
+        assert!(t.ts.is_none());
+        assert!(t.ts_ms.is_none());
+
+        let WsMessage::OrderbookSnapshot(ob) = decode(
+            r#"{"type":"orderbook_snapshot","msg":{"market_ticker":"X","yes_dollars_fp":[["0.99","100"]]}}"#,
+        ) else {
+            panic!("expected OrderbookSnapshot");
+        };
+        assert_eq!(ob.yes, vec![[99, 100]], "count without a decimal → 100");
+        assert!(ob.no.is_empty(), "absent no_dollars_fp → empty");
     }
 }
