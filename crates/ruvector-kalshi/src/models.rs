@@ -525,6 +525,20 @@ pub struct FillsResponse {
     pub cursor: Option<String>,
 }
 
+/// GET /portfolio/orders envelope (SONA ADR-042 §1 — the halt cancel-sweep's
+/// resting-order inventory read). Context7-verified against the live Kalshi V2
+/// OpenAPI spec (`docs.kalshi.com/openapi.yaml`, retrieved 2026-07-06):
+/// `orders[]` is the same `Order` object the `GET /portfolio/orders/{id}`
+/// read-back wraps (decoded here with the existing forward-compat
+/// [`OrderRecord`]); `cursor` is required on the wire and empty-string when
+/// there is no next page. Resting orders are ALWAYS available on this
+/// endpoint (never historical-only), per the spec's historical-cutoff note.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrdersResponse {
+    pub orders: Vec<OrderRecord>,
+    pub cursor: Option<String>,
+}
+
 /// Raw Kalshi WS envelope. `{"type": "...", "msg": {...}}`. `msg` is
 /// kept as a `Value` so unknown `type` tags don't fail the parse — the
 /// decoder routes on `msg_type`.
@@ -1144,6 +1158,75 @@ mod conformance_portfolio_2026_06_23 {
         assert_eq!(f.is_taker, Some(true));
         // The timestamp is `ts` (NOT `ts_ms`) — the field name the issue got wrong.
         assert_eq!(f.ts, Some(1678886400));
+    }
+}
+
+/// Orders-list wire-conformance fixtures (SONA ADR-042 §1 — the halt
+/// cancel-sweep's resting-order inventory). Shape Context7-verified against
+/// the live Kalshi V2 OpenAPI spec (`docs.kalshi.com/openapi.yaml`, retrieved
+/// 2026-07-06): post-fixed-point-migration `Order` objects (`*_count_fp` /
+/// `*_dollars` strings, no integer `count`), required `cursor`, and the
+/// deprecated-but-present `side`/`action` fields ignored by the
+/// forward-compat decode. These guard the next silent wire drift on the
+/// order-inventory read path.
+#[cfg(test)]
+mod conformance_orders_2026_07_06 {
+    use super::*;
+
+    /// GET /portfolio/orders?status=resting — the live post-migration shape:
+    /// fp-count/dollar strings only (integer `count` absent), extra canonical
+    /// fields (`outcome_side`/`book_side`) ignored, non-empty cursor = more
+    /// pages.
+    #[test]
+    fn orders_response_decodes_live_resting_page() {
+        let json = r#"{
+            "orders": [{
+                "order_id": "a1b2c3d4-0001",
+                "user_id": "u-1",
+                "client_order_id": "sona-exit-42",
+                "ticker": "KXMLBGAME-26JUL06TBKC-TB",
+                "side": "yes",
+                "action": "buy",
+                "outcome_side": "yes",
+                "book_side": "bid",
+                "type": "limit",
+                "status": "resting",
+                "yes_price_dollars": "0.4200",
+                "no_price_dollars": "0.5800",
+                "fill_count_fp": "0.00",
+                "remaining_count_fp": "1.00",
+                "initial_count_fp": "1.00",
+                "taker_fill_cost_dollars": "0.0000",
+                "maker_fill_cost_dollars": "0.0000",
+                "taker_fees_dollars": "0.0000",
+                "maker_fees_dollars": "0.0000",
+                "created_time": "2026-07-06T19:00:00Z",
+                "last_update_time": "2026-07-06T19:00:00Z"
+            }],
+            "cursor": "next-page-token"
+        }"#;
+        let r: OrdersResponse = serde_json::from_str(json).expect("orders page must decode");
+        assert_eq!(r.orders.len(), 1);
+        let o = &r.orders[0];
+        assert_eq!(o.order_id, "a1b2c3d4-0001");
+        assert_eq!(o.status, "resting");
+        assert_eq!(o.ticker, "KXMLBGAME-26JUL06TBKC-TB");
+        // Post-migration: integer `count` is absent; the fp string carries it.
+        assert_eq!(o.count, None);
+        assert_eq!(o.contract_count(), 1);
+        assert_eq!(o.remaining_count_fp.as_deref(), Some("1.00"));
+        // Non-empty cursor → caller must walk the next page.
+        assert_eq!(r.cursor.as_deref(), Some("next-page-token"));
+    }
+
+    /// The empty page (no resting orders): `orders` empty, empty-string
+    /// cursor = no next page — the sweep's clean-account fast path.
+    #[test]
+    fn orders_response_empty_page_decodes() {
+        let r: OrdersResponse =
+            serde_json::from_str(r#"{"orders": [], "cursor": ""}"#).expect("empty page decodes");
+        assert!(r.orders.is_empty());
+        assert_eq!(r.cursor.as_deref(), Some(""));
     }
 }
 

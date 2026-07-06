@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 use crate::auth::Signer;
 use crate::models::{
-    BalanceResponse, FillsResponse, Market, MarketsResponse, OrderAck, OrderbookResponse,
-    OrderbookSnapshot, PositionsResponse, V2AmendAck, V2AmendOrder, V2CancelAck,
-    V2CreateOrderRequest, V2OrderResponse,
+    BalanceResponse, FillsResponse, Market, MarketsResponse, OrderAck, OrderRecord,
+    OrderbookResponse, OrderbookSnapshot, OrdersResponse, PositionsResponse, V2AmendAck,
+    V2AmendOrder, V2CancelAck, V2CreateOrderRequest, V2OrderResponse,
 };
 use crate::rate_limit::RateLimiter;
 use crate::{KalshiError, Result};
@@ -218,6 +218,73 @@ impl RestClient {
         };
         self.send(reqwest::Method::GET, &path, NO_BODY).await
     }
+
+    /// One page of GET /portfolio/orders (SONA ADR-042 §1 — the halt
+    /// cancel-sweep's order inventory). Signed read; NOT gated on
+    /// `KALSHI_ENABLE_LIVE` (it mutates nothing). `status` filters server-side
+    /// (`resting` | `canceled` | `executed`); resting orders are always
+    /// available on this endpoint (never historical-only). An empty-string /
+    /// absent response `cursor` means no next page; use
+    /// [`Self::get_resting_orders`] for the walked read.
+    pub async fn get_orders(
+        &self,
+        status: Option<&str>,
+        ticker: Option<&str>,
+        cursor: Option<&str>,
+    ) -> Result<OrdersResponse> {
+        let mut params: Vec<String> = Vec::new();
+        if let Some(s) = status {
+            params.push(format!("status={s}"));
+        }
+        if let Some(t) = ticker {
+            params.push(format!("ticker={t}"));
+        }
+        if let Some(c) = cursor {
+            if !c.is_empty() {
+                params.push(format!("cursor={c}"));
+            }
+        }
+        let path = if params.is_empty() {
+            "/portfolio/orders".to_string()
+        } else {
+            format!("/portfolio/orders?{}", params.join("&"))
+        };
+        self.send(reqwest::Method::GET, &path, NO_BODY).await
+    }
+
+    /// EVERY resting order, cursor-walked to exhaustion (SONA ADR-042 §1: the
+    /// cancel sweep is only as good as its inventory — a single-page read
+    /// would silently miss resting orders past the first page, the exact
+    /// truncation trap the fork's `list_markets` is documented to have).
+    /// Pages are capped at [`Self::ORDERS_WALK_MAX_PAGES`] as a runaway guard
+    /// (default server page = 100 orders; the cap is far above any real SONA
+    /// book); hitting the cap returns an error rather than a silently
+    /// truncated inventory — fail loud, never fabricate completeness.
+    pub async fn get_resting_orders(&self, ticker: Option<&str>) -> Result<Vec<OrderRecord>> {
+        let mut all: Vec<OrderRecord> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..Self::ORDERS_WALK_MAX_PAGES {
+            let page = self
+                .get_orders(Some("resting"), ticker, cursor.as_deref())
+                .await?;
+            all.extend(page.orders);
+            match page.cursor.as_deref() {
+                Some("") | None => return Ok(all),
+                Some(next) => cursor = Some(next.to_string()),
+            }
+        }
+        Err(KalshiError::Api {
+            status: 0,
+            body: format!(
+                "get_resting_orders: cursor walk exceeded {} pages — refusing to return a \
+                 possibly-truncated inventory",
+                Self::ORDERS_WALK_MAX_PAGES
+            ),
+        })
+    }
+
+    /// Runaway guard for [`Self::get_resting_orders`]'s cursor walk.
+    pub const ORDERS_WALK_MAX_PAGES: usize = 50;
 }
 
 fn require_live_flag() -> Result<()> {
