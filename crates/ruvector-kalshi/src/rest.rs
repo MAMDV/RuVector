@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use crate::auth::Signer;
 use crate::models::{
-    BalanceResponse, FillsResponse, Market, MarketsResponse, OrderAck, OrderRecord,
-    OrderbookResponse, OrderbookSnapshot, OrdersResponse, PositionsResponse, V2AmendAck,
+    BalanceResponse, FillsResponse, Market, MarketPosition, MarketsResponse, OrderAck, OrderRecord,
+    OrderbookResponse, OrderbookSnapshot, OrdersResponse, PositionsResponse, RestFill, V2AmendAck,
     V2AmendOrder, V2CancelAck, V2CreateOrderRequest, V2OrderResponse,
 };
 use crate::rate_limit::RateLimiter;
@@ -184,25 +184,44 @@ impl RestClient {
             .await
     }
 
-    /// Read the member's market positions (GET /portfolio/positions). READ —
-    /// not gated. Pass `ticker` to scope to one market (the ramp-reconciliation
-    /// path scopes to the traded ticker). First page only — the caller inspects
-    /// the response `cursor` to detect truncation (issue #55 item 7).
-    pub async fn get_positions(&self, ticker: Option<&str>) -> Result<PositionsResponse> {
-        let path = match ticker {
-            Some(t) => format!("/portfolio/positions?ticker={t}"),
-            None => "/portfolio/positions".into(),
+    /// One page of the member's market positions (GET /portfolio/positions).
+    /// READ — not gated. Pass `ticker` to scope to one market (the ramp-
+    /// reconciliation path scopes to the traded ticker); pass `cursor` to fetch
+    /// a subsequent page. An empty-string / absent response `cursor` means no
+    /// next page; use [`Self::get_all_positions`] for the walked read (issue #55
+    /// item 7).
+    pub async fn get_positions(
+        &self,
+        ticker: Option<&str>,
+        cursor: Option<&str>,
+    ) -> Result<PositionsResponse> {
+        let mut params: Vec<String> = Vec::new();
+        if let Some(t) = ticker {
+            params.push(format!("ticker={t}"));
+        }
+        if let Some(c) = cursor {
+            if !c.is_empty() {
+                params.push(format!("cursor={c}"));
+            }
+        }
+        let path = if params.is_empty() {
+            "/portfolio/positions".to_string()
+        } else {
+            format!("/portfolio/positions?{}", params.join("&"))
         };
         self.send(reqwest::Method::GET, &path, NO_BODY).await
     }
 
-    /// Read the member's fills (GET /portfolio/fills). READ — not gated. Scope
-    /// by `ticker` and/or `order_id` (gap-fill on reconnect / audit
-    /// reconciliation). First page only (issue #55 item 7).
+    /// One page of the member's fills (GET /portfolio/fills). READ — not gated.
+    /// Scope by `ticker` and/or `order_id` (gap-fill on reconnect / audit
+    /// reconciliation); pass `cursor` to fetch a subsequent page. An empty-
+    /// string / absent response `cursor` means no next page; use
+    /// [`Self::get_all_fills`] for the walked read (issue #55 item 7).
     pub async fn get_fills(
         &self,
         ticker: Option<&str>,
         order_id: Option<&str>,
+        cursor: Option<&str>,
     ) -> Result<FillsResponse> {
         let mut params: Vec<String> = Vec::new();
         if let Some(t) = ticker {
@@ -210,6 +229,11 @@ impl RestClient {
         }
         if let Some(o) = order_id {
             params.push(format!("order_id={o}"));
+        }
+        if let Some(c) = cursor {
+            if !c.is_empty() {
+                params.push(format!("cursor={c}"));
+            }
         }
         let path = if params.is_empty() {
             "/portfolio/fills".to_string()
@@ -285,6 +309,81 @@ impl RestClient {
 
     /// Runaway guard for [`Self::get_resting_orders`]'s cursor walk.
     pub const ORDERS_WALK_MAX_PAGES: usize = 50;
+
+    /// EVERY market position, cursor-walked to exhaustion (mirrors
+    /// [`Self::get_resting_orders`]: a single-page read would silently miss
+    /// positions past the first page, and a reconciliation is only as good as
+    /// its inventory). Pages are capped at [`Self::POSITIONS_WALK_MAX_PAGES`] as
+    /// a runaway guard; hitting the cap returns an error rather than a silently
+    /// truncated inventory — fail loud, never fabricate completeness.
+    ///
+    /// Return shape: `Vec<MarketPosition>` — the concatenation of every page's
+    /// `market_positions`. The spec's separate `event_positions` array is NOT
+    /// surfaced: [`PositionsResponse`] deliberately does not decode it (forward-
+    /// compat), so the single-page [`Self::get_positions`] does not expose it
+    /// either; the walk drops no field the single-page read carries.
+    pub async fn get_all_positions(&self, ticker: Option<&str>) -> Result<Vec<MarketPosition>> {
+        let mut all: Vec<MarketPosition> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..Self::POSITIONS_WALK_MAX_PAGES {
+            let page = self.get_positions(ticker, cursor.as_deref()).await?;
+            all.extend(page.market_positions);
+            match page.cursor.as_deref() {
+                Some("") | None => return Ok(all),
+                Some(next) => cursor = Some(next.to_string()),
+            }
+        }
+        Err(KalshiError::Api {
+            status: 0,
+            body: format!(
+                "get_all_positions: cursor walk exceeded {} pages — refusing to return a \
+                 possibly-truncated inventory",
+                Self::POSITIONS_WALK_MAX_PAGES
+            ),
+        })
+    }
+
+    /// Runaway guard for [`Self::get_all_positions`]'s cursor walk.
+    pub const POSITIONS_WALK_MAX_PAGES: usize = 50;
+
+    /// EVERY fill, cursor-walked to exhaustion (mirrors
+    /// [`Self::get_resting_orders`]: a single-page read would silently miss
+    /// fills past the first page — the exact gap-fill/audit-reconciliation trap
+    /// this endpoint feeds). Pages are capped at [`Self::FILLS_WALK_MAX_PAGES`]
+    /// as a runaway guard; hitting the cap returns an error rather than a
+    /// silently truncated inventory — fail loud, never fabricate completeness.
+    ///
+    /// Return shape: `Vec<RestFill>` — the concatenation of every page's
+    /// `fills` ([`FillsResponse`] carries a single `fills` list, so no field is
+    /// dropped). Scope with `ticker` / `order_id` before walking (a per-order
+    /// gap-fill rarely spans pages, but the walk still guarantees completeness).
+    pub async fn get_all_fills(
+        &self,
+        ticker: Option<&str>,
+        order_id: Option<&str>,
+    ) -> Result<Vec<RestFill>> {
+        let mut all: Vec<RestFill> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..Self::FILLS_WALK_MAX_PAGES {
+            let page = self.get_fills(ticker, order_id, cursor.as_deref()).await?;
+            all.extend(page.fills);
+            match page.cursor.as_deref() {
+                Some("") | None => return Ok(all),
+                Some(next) => cursor = Some(next.to_string()),
+            }
+        }
+        Err(KalshiError::Api {
+            status: 0,
+            body: format!(
+                "get_all_fills: cursor walk exceeded {} pages — refusing to return a \
+                 possibly-truncated inventory",
+                Self::FILLS_WALK_MAX_PAGES
+            ),
+        })
+    }
+
+    /// Runaway guard for [`Self::get_all_fills`]'s cursor walk.
+    pub const FILLS_WALK_MAX_PAGES: usize = 50;
 }
 
 fn require_live_flag() -> Result<()> {

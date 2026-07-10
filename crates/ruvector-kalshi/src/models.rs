@@ -1230,6 +1230,252 @@ mod conformance_orders_2026_07_06 {
     }
 }
 
+/// Multi-page wire-conformance fixtures for the cursor-walked positions/fills
+/// reads (`RestClient::get_all_positions` / `get_all_fills`). Shapes
+/// Context7-verified against the live Kalshi V2 OpenAPI spec
+/// (`docs.kalshi.com/openapi.yaml`, retrieved 2026-07-10): both endpoints are
+/// cursor-paginated; `GET /portfolio/positions` returns `market_positions`
+/// (fixed-point `position_fp` + `*_dollars` money) plus a separate
+/// `event_positions` array the forward-compat [`PositionsResponse`] ignores;
+/// `GET /portfolio/fills` returns `fills` (`fill_id`/`order_id`/`count_fp`/
+/// `fee_cost`, canonical `outcome_side`/`book_side`) with a required `cursor`.
+///
+/// These are DECODE-LEVEL fixtures: each covers a page-1 payload with a
+/// non-empty cursor (the sentinel that makes the walk fetch another page) and
+/// a page-2 payload with an empty/absent cursor (the sentinel that stops it).
+/// The `get_all_*` HTTP walk loop itself is NOT unit-tested here — the crate
+/// ships no mock transport (`RestClient::send` holds a live `reqwest::Client`
+/// with no injectable seam), the exact same limitation under which the
+/// pre-existing `get_resting_orders` walk is also untested. The
+/// `*_walk_over_decoded_pages_*` tests below exercise the page-merge +
+/// stop-on-empty-cursor SEMANTICS against the decoded fixtures, which is what
+/// is testable at this layer.
+#[cfg(test)]
+mod conformance_walked_positions_fills_2026_07_10 {
+    use super::*;
+
+    // --- positions --------------------------------------------------------
+
+    /// GET /portfolio/positions page 1 — realistic fixed-point shapes, the
+    /// spec's `event_positions` array present-but-ignored, and a NON-EMPTY
+    /// cursor: the walk must fetch the next page.
+    #[test]
+    fn positions_page_one_has_next_cursor() {
+        let json = r#"{
+            "market_positions": [{
+                "ticker": "KXMLBGAME-26JUL10NYYBOS-NYY",
+                "position_fp": "10.00",
+                "market_exposure_dollars": "5.2000",
+                "total_traded_dollars": "5.2000",
+                "realized_pnl_dollars": "0.0000",
+                "resting_orders_count": 0,
+                "fees_paid_dollars": "0.0700",
+                "last_updated_ts": "2026-07-10T18:00:00Z"
+            }],
+            "event_positions": [{
+                "event_ticker": "KXMLBGAME-26JUL10NYYBOS",
+                "total_cost_dollars": "5.2000",
+                "total_cost_shares_fp": "10.00",
+                "event_exposure_dollars": "5.2000",
+                "realized_pnl_dollars": "0.0000",
+                "fees_paid_dollars": "0.0700"
+            }],
+            "cursor": "pos-page-2-token"
+        }"#;
+        let r: PositionsResponse = serde_json::from_str(json).expect("positions page 1 decodes");
+        assert_eq!(r.market_positions.len(), 1);
+        let p = &r.market_positions[0];
+        assert_eq!(p.ticker, "KXMLBGAME-26JUL10NYYBOS-NYY");
+        assert_eq!(p.position_contracts(), 10);
+        assert_eq!(p.total_traded_dollars.as_deref(), Some("5.2000"));
+        // Non-empty cursor → the walk continues to page 2.
+        assert_eq!(r.cursor.as_deref(), Some("pos-page-2-token"));
+    }
+
+    /// GET /portfolio/positions page 2 — a second (short) position and an
+    /// EMPTY cursor: the walk stops here. Also asserts the absent-`cursor`
+    /// shape terminates identically (decodes to `None`).
+    #[test]
+    fn positions_page_two_terminates_walk() {
+        let json = r#"{
+            "market_positions": [{
+                "ticker": "KXMLBGAME-26JUL10LADSF-SF",
+                "position_fp": "-3.00",
+                "market_exposure_dollars": "1.4400",
+                "total_traded_dollars": "1.4400",
+                "realized_pnl_dollars": "0.0000",
+                "fees_paid_dollars": "0.0200",
+                "last_updated_ts": "2026-07-10T18:05:00Z"
+            }],
+            "event_positions": [],
+            "cursor": ""
+        }"#;
+        let r: PositionsResponse = serde_json::from_str(json).expect("positions page 2 decodes");
+        assert_eq!(r.market_positions.len(), 1);
+        // Signed short position decodes.
+        assert_eq!(r.market_positions[0].position_contracts(), -3);
+        // Empty cursor → the walk stops.
+        assert_eq!(r.cursor.as_deref(), Some(""));
+
+        // An absent `cursor` is the other terminal sentinel (`None`).
+        let no_cursor: PositionsResponse =
+            serde_json::from_str(r#"{"market_positions": []}"#).expect("absent cursor decodes");
+        assert!(no_cursor.market_positions.is_empty());
+        assert_eq!(no_cursor.cursor.as_deref(), None);
+    }
+
+    /// The page-merge + stop-on-empty-cursor semantics of `get_all_positions`,
+    /// exercised over the two decoded wire pages (the HTTP loop is not
+    /// unit-testable without a mock transport — see the module doc). Mirrors
+    /// the production walk's `Some("") | None => stop` predicate.
+    #[test]
+    fn positions_walk_over_decoded_pages_concatenates_and_stops() {
+        let page1 = r#"{
+            "market_positions": [{"ticker": "A", "position_fp": "10.00"}],
+            "event_positions": [],
+            "cursor": "pos-page-2-token"
+        }"#;
+        let page2 = r#"{
+            "market_positions": [{"ticker": "B", "position_fp": "-3.00"}],
+            "event_positions": [],
+            "cursor": ""
+        }"#;
+        let pages = [page1, page2];
+
+        let mut all: Vec<MarketPosition> = Vec::new();
+        let mut consumed = 0usize;
+        for raw in pages {
+            let page: PositionsResponse = serde_json::from_str(raw).expect("page decodes");
+            all.extend(page.market_positions);
+            consumed += 1;
+            // Same termination decision as RestClient::get_all_positions.
+            if matches!(page.cursor.as_deref(), Some("") | None) {
+                break;
+            }
+        }
+        // Both pages consumed, both positions concatenated, stopped on page 2.
+        assert_eq!(consumed, 2);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].ticker, "A");
+        assert_eq!(all[1].ticker, "B");
+        assert_eq!(all[1].position_contracts(), -3);
+    }
+
+    // --- fills ------------------------------------------------------------
+
+    /// GET /portfolio/fills page 1 — `fill_id`/`order_id`/`count_fp`/`fee_cost`
+    /// + canonical `outcome_side`/`book_side` + `ts` (int64), and a NON-EMPTY
+    /// cursor: the walk must fetch the next page.
+    #[test]
+    fn fills_page_one_has_next_cursor() {
+        let json = r#"{
+            "fills": [{
+                "fill_id": "f-1",
+                "trade_id": "f-1",
+                "order_id": "o-1",
+                "ticker": "KXMLBGAME-26JUL10NYYBOS-NYY",
+                "market_ticker": "KXMLBGAME-26JUL10NYYBOS-NYY",
+                "side": "yes",
+                "action": "buy",
+                "outcome_side": "yes",
+                "book_side": "bid",
+                "count_fp": "1.00",
+                "yes_price_dollars": "0.5200",
+                "no_price_dollars": "0.4800",
+                "is_taker": true,
+                "fee_cost": "0.0100",
+                "created_time": "2026-07-10T18:00:00Z",
+                "ts": 1752170400
+            }],
+            "cursor": "fill-page-2-token"
+        }"#;
+        let r: FillsResponse = serde_json::from_str(json).expect("fills page 1 decodes");
+        assert_eq!(r.fills.len(), 1);
+        let f = &r.fills[0];
+        assert_eq!(f.fill_id, "f-1");
+        assert_eq!(f.order_id, "o-1");
+        assert_eq!(count_fp_str_to_contracts(f.count_fp.as_deref().unwrap()), Some(1));
+        assert_eq!(f.fee_cost.as_deref(), Some("0.0100"));
+        assert_eq!(f.outcome_side.as_deref(), Some("yes"));
+        assert_eq!(f.book_side.as_deref(), Some("bid"));
+        // Non-empty cursor → the walk continues to page 2.
+        assert_eq!(r.cursor.as_deref(), Some("fill-page-2-token"));
+    }
+
+    /// GET /portfolio/fills page 2 — a second fill and an EMPTY cursor: the
+    /// walk stops. Also asserts the absent-`cursor` shape terminates (`None`).
+    #[test]
+    fn fills_page_two_terminates_walk() {
+        let json = r#"{
+            "fills": [{
+                "fill_id": "f-2",
+                "trade_id": "f-2",
+                "order_id": "o-2",
+                "ticker": "KXMLBGAME-26JUL10LADSF-SF",
+                "market_ticker": "KXMLBGAME-26JUL10LADSF-SF",
+                "side": "no",
+                "action": "sell",
+                "outcome_side": "no",
+                "book_side": "ask",
+                "count_fp": "2.00",
+                "yes_price_dollars": "0.6100",
+                "no_price_dollars": "0.3900",
+                "is_taker": false,
+                "fee_cost": "0.0200",
+                "created_time": "2026-07-10T18:05:00Z",
+                "ts": 1752170700
+            }],
+            "cursor": ""
+        }"#;
+        let r: FillsResponse = serde_json::from_str(json).expect("fills page 2 decodes");
+        assert_eq!(r.fills.len(), 1);
+        assert_eq!(r.fills[0].fill_id, "f-2");
+        assert_eq!(r.fills[0].outcome_side.as_deref(), Some("no"));
+        // Empty cursor → the walk stops.
+        assert_eq!(r.cursor.as_deref(), Some(""));
+
+        // An absent `cursor` is the other terminal sentinel (`None`).
+        let no_cursor: FillsResponse =
+            serde_json::from_str(r#"{"fills": []}"#).expect("absent cursor decodes");
+        assert!(no_cursor.fills.is_empty());
+        assert_eq!(no_cursor.cursor.as_deref(), None);
+    }
+
+    /// The page-merge + stop-on-empty-cursor semantics of `get_all_fills`,
+    /// exercised over the two decoded wire pages (the HTTP loop is not
+    /// unit-testable without a mock transport — see the module doc). Mirrors
+    /// the production walk's `Some("") | None => stop` predicate.
+    #[test]
+    fn fills_walk_over_decoded_pages_concatenates_and_stops() {
+        let page1 = r#"{
+            "fills": [{"fill_id": "f-1", "order_id": "o-1", "ticker": "A", "count_fp": "1.00"}],
+            "cursor": "fill-page-2-token"
+        }"#;
+        let page2 = r#"{
+            "fills": [{"fill_id": "f-2", "order_id": "o-2", "ticker": "B", "count_fp": "2.00"}],
+            "cursor": ""
+        }"#;
+        let pages = [page1, page2];
+
+        let mut all: Vec<RestFill> = Vec::new();
+        let mut consumed = 0usize;
+        for raw in pages {
+            let page: FillsResponse = serde_json::from_str(raw).expect("page decodes");
+            all.extend(page.fills);
+            consumed += 1;
+            // Same termination decision as RestClient::get_all_fills.
+            if matches!(page.cursor.as_deref(), Some("") | None) {
+                break;
+            }
+        }
+        // Both pages consumed, both fills concatenated, stopped on page 2.
+        assert_eq!(consumed, 2);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].fill_id, "f-1");
+        assert_eq!(all[1].fill_id, "f-2");
+    }
+}
+
 /// WebSocket wire-conformance fixtures (SONA issue #55 Phase B). The 5 live WS
 /// channel frames decoded through the real `WsEnvelope → WsMessage::from_envelope`
 /// path, asserting the integer-cent / integer-contract values the boundary
