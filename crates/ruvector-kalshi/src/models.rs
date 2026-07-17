@@ -738,12 +738,24 @@ pub struct WsFill {
     /// — the accumulation-error cross-check the (deferred) fill consumer
     /// reconciles its running position against. issue #55 item 9 Prereq B.
     pub post_position_fp: Option<String>,
-    // NOTE (Context7 2026-06-28, SONA #55 Phase B): full WS wire conformance has
-    // now landed — `yes_price`/`no_price`/`count` deserialize from the live
+    /// Exchange fee paid for THIS fill, as a fixed-point US-dollar string
+    /// (Kalshi `fee_cost`; Required on the wire per the user-fills schema,
+    /// Context7-verified `/websites/kalshi_websockets` 2026-07-17 — the TOTAL
+    /// fee for the fill, not a per-contract average). Kept `Option` +
+    /// `default` for serde-backward-compatible decode of older captures. The
+    /// SONA WS fill listener (issue #55 phase 1, canary phase-2 prerequisite)
+    /// maps this to `TradeFill.fees_cents` via `dollars_str_to_cents`; without
+    /// it a WS-first record books `fees_cents = 0` and corrupts the canary's
+    /// fees-actual-vs-model measurement.
+    #[serde(default)]
+    pub fee_cost: Option<String>,
+    // NOTE (Context7 2026-06-28, SONA #55 Phase B; fee_cost added 2026-07-17):
+    // full WS wire conformance has landed — `yes_price`/`no_price`/`count`
+    // deserialize from the live
     // `yes_price_dollars`/`no_price_dollars`/`count_fp` fixed-point strings via
     // the boundary helpers, so the integer-cent Rust fields downstream
-    // `normalize.rs` consumes are unchanged. `fee_cost` is still not modeled
-    // (SONA does not read it on the WS path).
+    // `normalize.rs` consumes are unchanged. `fee_cost` is modeled as the raw
+    // dollar string (SONA parses it at its own boundary).
 }
 
 #[cfg(test)]
@@ -846,6 +858,7 @@ mod tests {
         assert!(f.trade_id.is_none());
         assert!(f.ts_ms.is_none());
         assert!(f.post_position_fp.is_none());
+        assert!(f.fee_cost.is_none(), "absent fee_cost decodes to None (backward-compat)");
     }
 
     #[test]
@@ -1616,6 +1629,7 @@ mod conformance_ws_2026_06_28 {
                 "side":"yes",
                 "yes_price_dollars":"0.750",
                 "count_fp":"278.00",
+                "fee_cost":"2.7800",
                 "action":"buy",
                 "ts":1671899397,
                 "ts_ms":1671899397000,
@@ -1639,6 +1653,10 @@ mod conformance_ws_2026_06_28 {
         assert_eq!(f.ts, Some(1671899397));
         assert_eq!(f.ts_ms, Some(1671899397000));
         assert_eq!(f.post_position_fp.as_deref(), Some("500.00"));
+        // fee_cost (2026-07-17, SONA #55 phase 1): the TOTAL exchange fee for
+        // this fill as the raw fixed-point dollar string — SONA parses it at
+        // its own boundary (dollars_str_to_cents → fees_cents).
+        assert_eq!(f.fee_cost.as_deref(), Some("2.7800"));
     }
 
     /// Backward-compat: frames missing the optional fields still decode —
