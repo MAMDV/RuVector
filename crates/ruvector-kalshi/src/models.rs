@@ -37,6 +37,39 @@ pub fn dollars_str_to_cents(s: &str) -> Option<i64> {
     Some(if neg { -cents } else { cents })
 }
 
+/// Parse a Kalshi dollar-string BALANCE (e.g. `"511.2887"`) into integer cents
+/// by TRUNCATING (flooring) the sub-cent remainder, never rounding it up.
+///
+/// Deliberately NOT [`dollars_str_to_cents`], which rounds half-up on the third
+/// fractional digit. That rounding is right for a price (a quote is a whole
+/// cent and the extra digits are formatting) and WRONG for a balance: a
+/// fail-closed pre-flight that over-reports spendable money by a cent is a gate
+/// that can pass an order the account cannot fund.
+///
+/// The venue itself floors. Live keyed read 2026-09-02T14:35Z (recorded in
+/// `docs/mak-journal/sep1-2026/session2/decisions/read-outcome-2026-09-02.md`):
+/// `GET /portfolio/balance` returned `balance_dollars: "511.2887"` alongside the
+/// integer `balance: 51128` — the floor, not 51129. This helper reproduces the
+/// venue's own convention so the per-shard breakdown and the top-level integer
+/// agree.
+pub fn dollars_str_to_cents_floor(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let neg = s.starts_with('-');
+    let body = s.trim_start_matches(['-', '+']);
+    let (whole, frac) = body.split_once('.').unwrap_or((body, ""));
+    let whole: i64 = whole.parse().ok()?;
+    let mut digits = frac.chars();
+    let d0 = digits.next().and_then(|c| c.to_digit(10)).unwrap_or(0) as i64;
+    let d1 = digits.next().and_then(|c| c.to_digit(10)).unwrap_or(0) as i64;
+    // Any remaining fractional digits are sub-cent and are DROPPED, never
+    // rounded up — see the doc comment.
+    let cents = whole * 100 + d0 * 10 + d1;
+    Some(if neg { -cents } else { cents })
+}
+
 /// Parse a Kalshi fixed-point count string (e.g. `"1.00"`, `"10.00"`) into an
 /// integer contract count. Contracts are whole; the `.00` is formatting.
 pub fn count_fp_str_to_contracts(s: &str) -> Option<i64> {
@@ -127,6 +160,32 @@ where
         .ok_or_else(|| <D::Error as serde::de::Error>::custom(format!("unparseable count {s:?}")))
 }
 
+/// One legal price band on a market (`Market.price_ranges[]`, spec schema
+/// `PriceRange`). All three members are REQUIRED dollar strings on the wire.
+///
+/// Venue facts, verified at write time (SONA #700):
+///   * Context7 `/openapi/kalshi_openapi_yaml` [2026-09-02]: "**price_ranges**
+///     (array (PriceRange)) (required): Valid price ranges for orders on this
+///     market", items `start` / `end` / `step`, each "(string) (required)"
+///     ("Price step/tick size for this range in dollars").
+///   * Live `GET /markets/KXMLBGAME-26SEP042210WSHLAD-WSH`
+///     [2026-09-02T16:18:20Z, api.elections.kalshi.com]:
+///     `[{"start":"0.0000","end":"1.0000","step":"0.0100"}]` — a uniform 1c tick.
+///   * Live `GET /markets?series_ticker=KXBTC15M&status=open&limit=1`
+///     [2026-09-02T16:18:31Z]: THREE bands, `step` `"0.0010"` in the two tails
+///     and `"0.0100"` in the middle — i.e. the uniform-1c-tick assumption is
+///     false on 15-minute crypto. Modelled here so a consumer can see the tick;
+///     no arithmetic in this crate reads it yet (SONA drift item D5).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PriceRange {
+    /// Starting price for this range, dollar string (e.g. `"0.0000"`).
+    pub start: Option<String>,
+    /// Ending price for this range, dollar string (e.g. `"1.0000"`).
+    pub end: Option<String>,
+    /// Price step / tick size for this range, dollar string (e.g. `"0.0100"`).
+    pub step: Option<String>,
+}
+
 /// Market metadata (GET /markets, /markets/{ticker}).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Market {
@@ -153,6 +212,51 @@ pub struct Market {
     pub no_bid_dollars: Option<String>,
     pub no_ask_dollars: Option<String>,
     pub last_price_dollars: Option<String>,
+    /// **The exchange shard this market trades on** (SONA #700). Kalshi shards
+    /// the production exchange; an order-class request that omits this field is
+    /// routed to shard 0 ("Defaults to 0 if unspecified"), which is why an MLB
+    /// order placed without it was refused `404 user_not_found` on 2026-08-31.
+    ///
+    /// Venue facts, verified at write time:
+    ///   * Context7 `/openapi/kalshi_openapi_yaml` [2026-09-02]: schema
+    ///     `ExchangeIndex` — "Identifier for an exchange shard. Defaults to 0 if
+    ///     unspecified."; present on `GetMarketResponse.market` as an OPTIONAL
+    ///     integer.
+    ///   * Live `GET /trade-api/v2/exchange/status` [2026-09-02T16:18:17Z,
+    ///     api.elections.kalshi.com]: FOUR production shards, all
+    ///     `trading_active: true` — 0 "Default", 1 "Combos", 2 "Crypto",
+    ///     3 "Tennis & Baseball".
+    ///   * Live `GET /markets/KXMLBGAME-26SEP042010TORKC-TOR`
+    ///     [2026-09-02T16:18:31Z]: `exchange_index: 3`. Live
+    ///     `GET /markets?series_ticker=KXBTC15M...` [same instant]:
+    ///     `exchange_index: 2`. The DEMO environment mirrors the shape — live
+    ///     `GET /trade-api/v2/exchange/status` and
+    ///     `GET /markets/KXMLBGAME-26SEP042010TORKC-TOR` on
+    ///     external-api.demo.kalshi.co [2026-09-02T16:18:42Z]: four demo shards,
+    ///     demo MLB market `exchange_index: 3`.
+    ///   * The Context7 snapshot ALSO carries "currently only supports a value
+    ///     of 0" (FCM orders reference) and a 2026-06-25 changelog line "only
+    ///     exchange index 0 is available in the production environment". Both
+    ///     are STALE against the dated live reads above; per the SONA
+    ///     venue-schema rule the live read is the fact of record.
+    ///
+    /// `Option` because the field is optional in the spec and absent from
+    /// pre-sharding cached payloads. A consumer on the money path must FAIL
+    /// CLOSED on `None` rather than substituting 0 — substituting 0 is exactly
+    /// the bug.
+    pub exchange_index: Option<i64>,
+    /// Price-level structure name for this market — the tick regime, spec-
+    /// required, a STRING (not an object).
+    ///
+    /// Context7 `/openapi/kalshi_openapi_yaml` [2026-09-02]:
+    /// "**price_level_structure** (string) (required): Price level structure for
+    /// this market, defining price ranges and tick sizes". Live values observed
+    /// [2026-09-02T16:18:20Z / 16:18:31Z]: `"linear_cent"` (KXMLBGAME) and
+    /// `"tapered_deci_cent"` (KXBTC15M).
+    pub price_level_structure: Option<String>,
+    /// Legal price bands + tick sizes for orders on this market. See
+    /// [`PriceRange`] for the dated live citations.
+    pub price_ranges: Option<Vec<PriceRange>>,
 }
 
 impl Market {
@@ -199,6 +303,20 @@ impl Market {
 pub struct MarketsResponse {
     pub markets: Vec<Market>,
     pub cursor: Option<String>,
+}
+
+/// Single-market read envelope (`GET /markets/{ticker}`) — the response nests
+/// the market under a `market` key (SONA #700; the crate previously bound only
+/// the LIST endpoint, so there was no way to read one ticker's
+/// [`Market::exchange_index`]).
+///
+/// Context7 `/openapi/kalshi_openapi_yaml` [2026-09-02]: schema
+/// `GetMarketResponse` — "**market** (object) (required)". Live
+/// `GET /markets/KXMLBGAME-26SEP042010TORKC-TOR` [2026-09-02T16:18:31Z,
+/// api.elections.kalshi.com]: envelope keys `['market']`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetMarketResponse {
+    pub market: Market,
 }
 
 /// Single trade print (GET /markets/trades).
@@ -305,6 +423,26 @@ pub struct V2CreateOrderRequest {
     /// REQUIRED by the V2 contract — Kalshi's idempotency / dedup key. Never
     /// omit it (an omitted key risks a duplicate live order).
     pub client_order_id: String,
+    /// **The exchange shard this order is routed to** (SONA #700).
+    /// `skip_serializing_if = "Option::is_none"` so a `None` serializes to a
+    /// byte-identical body to the pre-#700 request — every existing fixture and
+    /// every unsharded caller is unchanged, and the venue applies its documented
+    /// "defaults to 0" behaviour exactly as before.
+    ///
+    /// Venue facts, verified at write time: Context7
+    /// `/openapi/kalshi_openapi_yaml` [2026-09-02] lists `exchange_index` in the
+    /// OPTIONAL tail of the request body (the `required` set is `ticker`, `side`,
+    /// `count`, `price`, `time_in_force`, `self_trade_prevention_type`) with
+    /// schema `ExchangeIndex` — "Identifier for an exchange shard. Defaults to 0
+    /// if unspecified." Live `GET /trade-api/v2/exchange/status`
+    /// [2026-09-02T16:18:17Z]: four production shards, all trading-active.
+    ///
+    /// The caller MUST source this from the MARKET's own `exchange_index`
+    /// ([`Market::exchange_index`]) and fail closed when the market read does
+    /// not carry one. `-1` (the spec's auto-routing sentinel) is deliberately
+    /// NOT used by SONA: unverified in production on the order path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchange_index: Option<i64>,
 }
 
 /// V2 create-order response -- a LIGHTWEIGHT flat ack (NOT the legacy
@@ -355,6 +493,17 @@ pub struct V2AmendOrder {
     pub client_order_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_client_order_id: Option<String>,
+    /// **The exchange shard this amend is routed to** (SONA #700). Amend takes
+    /// the field in the JSON BODY (cancel takes it in the QUERY string — the
+    /// asymmetry a one-struct-field patch gets wrong). Context7
+    /// `/openapi/kalshi_openapi_yaml` [2026-09-02]:
+    /// `POST /portfolio/events/orders/{order_id}/amend` body required `ticker`,
+    /// `side`, `price`, `count`; optional `client_order_id`,
+    /// `updated_client_order_id`, `exchange_index`.
+    ///
+    /// `skip_serializing_if` keeps a `None` byte-identical to the pre-#700 body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchange_index: Option<i64>,
 }
 
 /// V2 cancel ack (DELETE /portfolio/events/orders/{id}) -- lightweight; does
@@ -403,6 +552,19 @@ pub struct OrderRecord {
     pub fill_count_fp: Option<String>,
     pub yes_price_dollars: Option<String>,
     pub no_price_dollars: Option<String>,
+    /// **The exchange shard this order rests on** (SONA #700). Decoded so the
+    /// ADR-042 §1 halt cancel-sweep can cancel each resting order on ITS OWN
+    /// shard instead of defaulting every DELETE to shard 0 — without this the
+    /// sweep silently cannot reach orders on shards 1-3.
+    ///
+    /// Venue facts: Context7 `/openapi/kalshi_openapi_yaml` [2026-09-02] — the
+    /// `GET /portfolio/orders` `Order` object carries `exchange_index`. Keyed
+    /// live read 2026-09-02T14:35Z (recorded in
+    /// `docs/mak-journal/sep1-2026/session2/decisions/read-outcome-2026-09-02.md`):
+    /// historical pre-sharding orders came back with `exchange_index: 0`, so the
+    /// field is populated on real rows. `Option` for forward-compat decode; a
+    /// consumer that needs the shard must fail closed on `None`, never assume 0.
+    pub exchange_index: Option<i64>,
 }
 
 impl OrderRecord {
@@ -435,8 +597,10 @@ impl OrderRecord {
 // These are READS — not gated on `KALSHI_ENABLE_LIVE`. SONA converts at the
 // crate boundary via the helpers above (`dollars_str_to_cents` /
 // `count_fp_str_to_contracts`); only the fields SONA consumes are declared
-// (deny_unknown_fields is OFF, so extra payload — `event_positions`,
-// `balance_breakdown`, the deprecated mirror fields — is ignored, not an error).
+// (deny_unknown_fields is OFF, so extra payload — `event_positions`, the
+// deprecated mirror fields — is ignored, not an error). `balance_breakdown` was
+// in that ignored set until SONA #700; it is now modelled (see
+// [`IndexedBalance`]) because a per-shard exchange needs a per-shard balance.
 // ---------------------------------------------------------------------------
 
 /// GET /portfolio/balance. `balance` and `portfolio_value` are integer cents
@@ -446,6 +610,11 @@ impl OrderRecord {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BalanceResponse {
     /// Member's available balance in integer cents.
+    ///
+    /// **This is the AGGREGATE across every exchange shard** — reading it alone
+    /// is the #700 bug: on 2026-08-31 the SONA pre-flight passed a balance gate
+    /// on 51128c while the shard the market actually lived on held 0. Use
+    /// [`Self::shard_balance_cents`] on the money path.
     pub balance: i64,
     /// Fixed-point dollar mirror of `balance` (e.g. `"1000.00"`); informational.
     pub balance_dollars: Option<String>,
@@ -453,6 +622,66 @@ pub struct BalanceResponse {
     pub portfolio_value: i64,
     /// Unix timestamp of the last balance update.
     pub updated_ts: Option<i64>,
+    /// **Per-shard balances** (SONA #700). Spec schema `IndexedBalance[]`.
+    ///
+    /// Context7 `/openapi/kalshi_openapi_yaml` [2026-09-02]:
+    /// "**balance_breakdown** (array (IndexedBalance)): User balance breakdown
+    /// per exchange instance, omitted only when using a subaccount-restricted
+    /// API key." Keyed live read 2026-09-02T14:35Z (recorded in the SONA tree at
+    /// `docs/mak-journal/sep1-2026/session2/decisions/read-outcome-2026-09-02.md`):
+    /// four entries — shard 0 `"511.2887"`, shards 1/2/3 `"0.0000"`.
+    ///
+    /// `Option` because the array is optional in the spec (absent for a
+    /// subaccount-restricted key). Absent is NOT "the shard is funded": a money-
+    /// path consumer must fail closed.
+    pub balance_breakdown: Option<Vec<IndexedBalance>>,
+}
+
+impl BalanceResponse {
+    /// The available balance ON ONE SHARD, in integer cents (SONA #700).
+    ///
+    /// Returns `None` when the breakdown array is absent entirely, or carries no
+    /// entry for `exchange_index`, or that entry's dollar string is
+    /// unparseable — three distinct "we do not know" states that a fail-closed
+    /// pre-flight must treat identically to a refusal. It NEVER falls back to
+    /// the aggregate [`Self::balance`]: that fallback is the 2026-08-31 refusal.
+    ///
+    /// Conversion is [`dollars_str_to_cents_floor`] (truncating), matching the
+    /// venue's own integer-cents field — see that function's doc for the dated
+    /// read.
+    pub fn shard_balance_cents(&self, exchange_index: i64) -> Option<i64> {
+        self.balance_breakdown
+            .as_ref()?
+            .iter()
+            .find(|e| e.exchange_index == exchange_index)
+            .and_then(|e| dollars_str_to_cents_floor(&e.balance))
+    }
+}
+
+/// One shard's balance inside [`BalanceResponse::balance_breakdown`] (spec
+/// schema `IndexedBalance`).
+///
+/// Context7 `/openapi/kalshi_openapi_yaml` [2026-09-02] — exactly two members,
+/// BOTH required: "**exchange_index** (integer) (required)" and
+/// "**balance** (string) (required): US dollar amount as a fixed-point decimal
+/// string". Note the asymmetry with the envelope: the top-level `balance` is
+/// INTEGER CENTS, the per-shard `balance` is a DOLLAR STRING. Modelled exactly
+/// as the wire carries it; read cents via
+/// [`BalanceResponse::shard_balance_cents`].
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct IndexedBalance {
+    /// Identifier for an exchange shard.
+    pub exchange_index: i64,
+    /// This shard's available balance as a fixed-point US-dollar string
+    /// (e.g. `"511.2887"`). NOT cents — see the struct doc.
+    pub balance: String,
+    /// Forward-compat only: the spec's `IndexedBalance` has NO `balance_dollars`
+    /// member as of the 2026-09-02 Context7 read, and the live keyed read of
+    /// 2026-09-02T14:35Z did not return one. Declared so a future venue-side
+    /// rename to the envelope's `*_dollars` convention decodes instead of
+    /// silently dropping; nothing reads it today.
+    #[serde(default)]
+    pub balance_dollars: Option<String>,
 }
 
 /// A single market position (GET /portfolio/positions → `market_positions[]`).
@@ -858,7 +1087,10 @@ mod tests {
         assert!(f.trade_id.is_none());
         assert!(f.ts_ms.is_none());
         assert!(f.post_position_fp.is_none());
-        assert!(f.fee_cost.is_none(), "absent fee_cost decodes to None (backward-compat)");
+        assert!(
+            f.fee_cost.is_none(),
+            "absent fee_cost decodes to None (backward-compat)"
+        );
     }
 
     #[test]
@@ -871,12 +1103,16 @@ mod tests {
             time_in_force: TimeInForce::GoodTillCanceled,
             self_trade_prevention_type: SelfTradePreventionType::TakerAtCross,
             client_order_id: "abc".into(),
+            exchange_index: None,
         };
         let s = serde_json::to_string(&o).unwrap();
         assert!(s.contains("\"side\":\"bid\""), "{s}");
         assert!(s.contains("\"count\":\"10.00\""), "{s}");
         assert!(s.contains("\"price\":\"0.56\""), "{s}");
-        assert!(s.contains("\"time_in_force\":\"good_till_canceled\""), "{s}");
+        assert!(
+            s.contains("\"time_in_force\":\"good_till_canceled\""),
+            "{s}"
+        );
         assert!(
             s.contains("\"self_trade_prevention_type\":\"taker_at_cross\""),
             "{s}"
@@ -898,11 +1134,15 @@ mod tests {
             time_in_force: TimeInForce::ImmediateOrCancel,
             self_trade_prevention_type: SelfTradePreventionType::TakerAtCross,
             client_order_id: "cli-2".into(),
+            exchange_index: None,
         };
         let s = serde_json::to_string(&o).unwrap();
         assert!(s.contains("\"side\":\"ask\""), "{s}");
         assert!(s.contains("\"price\":\"0.04\""), "{s}");
-        assert!(s.contains("\"time_in_force\":\"immediate_or_cancel\""), "{s}");
+        assert!(
+            s.contains("\"time_in_force\":\"immediate_or_cancel\""),
+            "{s}"
+        );
         // client_order_id is REQUIRED by the V2 contract — always serialized.
         assert!(s.contains("\"client_order_id\":\"cli-2\""), "{s}");
     }
@@ -920,7 +1160,10 @@ mod tests {
         assert_eq!(dollars_str_to_cents(&cents_to_dollars_str(52)), Some(52));
         assert_eq!(contracts_to_count_fp(1), "1.00");
         assert_eq!(contracts_to_count_fp(10), "10.00");
-        assert_eq!(count_fp_str_to_contracts(&contracts_to_count_fp(7)), Some(7));
+        assert_eq!(
+            count_fp_str_to_contracts(&contracts_to_count_fp(7)),
+            Some(7)
+        );
     }
 
     #[test]
@@ -1010,6 +1253,7 @@ mod conformance_2026_01_28 {
             fill_count_fp: None,
             yes_price_dollars: None,
             no_price_dollars: None,
+            exchange_index: None,
         };
         assert_eq!(legacy.contract_count(), 5);
         let migrated = OrderRecord {
@@ -1159,7 +1403,10 @@ mod conformance_portfolio_2026_06_23 {
         assert_eq!(f.fill_id, "f-1");
         assert_eq!(f.order_id, "o-1");
         // Count via the fixed-point parser.
-        assert_eq!(count_fp_str_to_contracts(f.count_fp.as_deref().unwrap()), Some(1));
+        assert_eq!(
+            count_fp_str_to_contracts(f.count_fp.as_deref().unwrap()),
+            Some(1)
+        );
         // Price via the dollar-string parser.
         assert_eq!(
             dollars_str_to_cents(f.yes_price_dollars.as_deref().unwrap()),
@@ -1407,7 +1654,10 @@ mod conformance_walked_positions_fills_2026_07_10 {
         let f = &r.fills[0];
         assert_eq!(f.fill_id, "f-1");
         assert_eq!(f.order_id, "o-1");
-        assert_eq!(count_fp_str_to_contracts(f.count_fp.as_deref().unwrap()), Some(1));
+        assert_eq!(
+            count_fp_str_to_contracts(f.count_fp.as_deref().unwrap()),
+            Some(1)
+        );
         assert_eq!(f.fee_cost.as_deref(), Some("0.0100"));
         assert_eq!(f.outcome_side.as_deref(), Some("yes"));
         assert_eq!(f.book_side.as_deref(), Some("bid"));
@@ -1682,5 +1932,269 @@ mod conformance_ws_2026_06_28 {
         };
         assert_eq!(ob.yes, vec![[99, 100]], "count without a decimal → 100");
         assert!(ob.no.is_empty(), "absent no_dollars_fp → empty");
+    }
+}
+
+/// Exchange-sharding wire-conformance fixtures (SONA #700, 2026-09-02).
+///
+/// Kalshi shards the production exchange. An order-class request that omits
+/// `exchange_index` is routed to shard 0, and on 2026-08-31T21:52Z a SONA MLB
+/// order placed that way was refused
+/// `404 user_not_found "Exchange user not found. For Predictions: reference
+/// documentation Exchange Sharding documentation."` The same refusal reproduced
+/// in the DEMO environment on 2026-09-02T16:15:27Z with every local gate green
+/// (the negative control). These fixtures pin the shapes the fix reads and
+/// writes so the next silent shard-side drift is a red test, not a refused
+/// order.
+///
+/// Sources actually queried for this module (no field is stated from memory):
+///   * Context7 `/openapi/kalshi_openapi_yaml` [2026-09-02] — schemas
+///     `ExchangeIndex`, `GetMarketResponse`, `GetBalanceResponse`,
+///     `IndexedBalance`, `PriceRange`, and the `DELETE
+///     /portfolio/events/orders/{order_id}` query parameters.
+///   * Live unkeyed GETs against `https://api.elections.kalshi.com/trade-api/v2`
+///     [2026-09-02T16:18:17Z-16:18:31Z]: `/exchange/status` (four shards),
+///     `/markets/KXMLBGAME-26SEP042010TORKC-TOR` (`exchange_index: 3`),
+///     `/markets?series_ticker=KXBTC15M&status=open&limit=1`
+///     (`exchange_index: 2`, three price ranges).
+///   * Live unkeyed GETs against `https://external-api.demo.kalshi.co/trade-api/v2`
+///     [2026-09-02T16:18:42Z]: `/exchange/status` (four demo shards),
+///     `/markets/KXMLBGAME-26SEP042010TORKC-TOR` (demo `exchange_index: 3`).
+///   * Keyed reads of 2026-09-02T14:35Z, recorded in the SONA tree at
+///     `docs/mak-journal/sep1-2026/session2/decisions/read-outcome-2026-09-02.md`
+///     — the `balance_breakdown` SHAPE only. Every balance NUMBER below is
+///     synthetic; no real balance is committed to this repository.
+#[cfg(test)]
+mod conformance_2026_09_02 {
+    use super::*;
+
+    /// `GET /markets/{ticker}` — the single-market envelope nests under
+    /// `market`, and the market carries the shard plus the tick regime. This is
+    /// the read the #700 order pre-flight depends on.
+    ///
+    /// Field values transcribed from the live MLB market read
+    /// [2026-09-02T16:18:31Z]; prices trimmed to the keys this crate models.
+    #[test]
+    fn market_read_carries_exchange_index_and_price_ranges() {
+        let json = r#"{
+            "market": {
+                "ticker": "KXMLBGAME-26SEP042010TORKC-TOR",
+                "event_ticker": "KXMLBGAME-26SEP042010TORKC",
+                "status": "active",
+                "exchange_index": 3,
+                "price_level_structure": "linear_cent",
+                "price_ranges": [{"start": "0.0000", "end": "1.0000", "step": "0.0100"}],
+                "yes_bid_dollars": "0.4700",
+                "yes_ask_dollars": "0.4900"
+            }
+        }"#;
+        let r: GetMarketResponse = serde_json::from_str(json).expect("market read must decode");
+        let m = r.market;
+        // The whole point of #700: MLB does not live on shard 0.
+        assert_eq!(m.exchange_index, Some(3));
+        assert_eq!(m.price_level_structure.as_deref(), Some("linear_cent"));
+        let ranges = m
+            .price_ranges
+            .clone()
+            .expect("price_ranges is spec-required");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].step.as_deref(), Some("0.0100"));
+        // The existing money-path decode is untouched by the new fields.
+        assert_eq!(m.yes_bid_cents(), Some(47));
+    }
+
+    /// 15-minute crypto (`KXBTC15M`) lives on shard 2 AND uses a tapered tick —
+    /// three price bands, 0.1c in the tails. Live read [2026-09-02T16:18:31Z].
+    /// Pinned because a uniform-1c-tick assumption is false here.
+    #[test]
+    fn crypto_market_has_shard_two_and_a_tapered_tick() {
+        let json = r#"{
+            "market": {
+                "ticker": "KXBTC15M-26SEP021230-30",
+                "status": "active",
+                "exchange_index": 2,
+                "price_level_structure": "tapered_deci_cent",
+                "price_ranges": [
+                    {"start": "0.0000", "end": "0.1000", "step": "0.0010"},
+                    {"start": "0.1000", "end": "0.9000", "step": "0.0100"},
+                    {"start": "0.9000", "end": "1.0000", "step": "0.0010"}
+                ]
+            }
+        }"#;
+        let m = serde_json::from_str::<GetMarketResponse>(json)
+            .expect("crypto market must decode")
+            .market;
+        assert_eq!(m.exchange_index, Some(2));
+        assert_eq!(
+            m.price_level_structure.as_deref(),
+            Some("tapered_deci_cent")
+        );
+        let ranges = m.price_ranges.expect("price_ranges is spec-required");
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0].step.as_deref(), Some("0.0010"));
+        assert_eq!(ranges[1].step.as_deref(), Some("0.0100"));
+    }
+
+    /// A market payload with NO `exchange_index` still decodes (the field is
+    /// optional in the spec) and yields `None` — the state a money-path caller
+    /// must FAIL CLOSED on. Substituting 0 here is the #700 bug.
+    #[test]
+    fn market_without_exchange_index_decodes_to_none_not_zero() {
+        let json = r#"{"market":{"ticker":"X","status":"active"}}"#;
+        let m = serde_json::from_str::<GetMarketResponse>(json)
+            .expect("must decode")
+            .market;
+        assert_eq!(m.exchange_index, None);
+        assert_eq!(m.price_ranges, None);
+    }
+
+    /// `POST /portfolio/events/orders` — a request carrying a shard serializes
+    /// `exchange_index`; a request WITHOUT one omits the key entirely, leaving
+    /// the body byte-identical to the pre-#700 wire.
+    #[test]
+    fn create_order_serializes_exchange_index_only_when_present() {
+        let base = V2CreateOrderRequest {
+            ticker: "KXMLBGAME-26SEP042010TORKC-TOR".into(),
+            side: V2Side::Bid,
+            count: "5.00".into(),
+            price: "0.47".into(),
+            time_in_force: TimeInForce::GoodTillCanceled,
+            self_trade_prevention_type: SelfTradePreventionType::TakerAtCross,
+            client_order_id: "idem-700".into(),
+            exchange_index: None,
+        };
+        let unsharded = serde_json::to_value(&base).expect("serialize");
+        assert!(
+            unsharded.get("exchange_index").is_none(),
+            "a None shard must not appear on the wire at all (byte-identical to pre-#700)"
+        );
+        // Every other key is exactly the seven the V2 contract already carried.
+        let obj = unsharded.as_object().expect("object");
+        assert_eq!(
+            obj.len(),
+            7,
+            "unsharded body must still be the 7-field V2 request"
+        );
+
+        let sharded = V2CreateOrderRequest {
+            exchange_index: Some(3),
+            ..base
+        };
+        let v = serde_json::to_value(&sharded).expect("serialize");
+        assert_eq!(v["exchange_index"], serde_json::json!(3));
+        assert_eq!(
+            v["ticker"],
+            serde_json::json!("KXMLBGAME-26SEP042010TORKC-TOR")
+        );
+    }
+
+    /// `POST /portfolio/events/orders/{id}/amend` takes the shard in the BODY
+    /// (cancel takes it in the query — the asymmetry a one-field patch misses).
+    #[test]
+    fn amend_order_carries_exchange_index_in_the_body() {
+        let amend = V2AmendOrder {
+            ticker: "KXMLBGAME-26SEP042010TORKC-TOR".into(),
+            side: V2Side::Bid,
+            price: "0.48".into(),
+            count: "5.00".into(),
+            client_order_id: None,
+            updated_client_order_id: None,
+            exchange_index: Some(3),
+        };
+        let v = serde_json::to_value(&amend).expect("serialize");
+        assert_eq!(v["exchange_index"], serde_json::json!(3));
+
+        let unsharded = V2AmendOrder {
+            exchange_index: None,
+            ..amend
+        };
+        let v = serde_json::to_value(&unsharded).expect("serialize");
+        assert!(v.get("exchange_index").is_none());
+    }
+
+    /// `GET /portfolio/orders` — the resting-order inventory exposes each
+    /// order's shard, which is what lets the ADR-042 §1 halt cancel-sweep cancel
+    /// on the right shard instead of defaulting every DELETE to 0.
+    #[test]
+    fn order_record_decodes_its_exchange_index() {
+        let json = r#"{
+            "order_id": "ord-1",
+            "status": "resting",
+            "ticker": "KXMLBGAME-26SEP042010TORKC-TOR",
+            "exchange_index": 3,
+            "initial_count_fp": "5.00"
+        }"#;
+        let o: OrderRecord = serde_json::from_str(json).expect("order must decode");
+        assert_eq!(o.exchange_index, Some(3));
+        assert_eq!(o.contract_count(), 5);
+
+        // Pre-sharding payloads have no such key — `None`, never a silent 0.
+        let legacy: OrderRecord =
+            serde_json::from_str(r#"{"order_id":"o","status":"resting","ticker":"T"}"#)
+                .expect("legacy order must decode");
+        assert_eq!(legacy.exchange_index, None);
+    }
+
+    /// `GET /portfolio/balance` — the per-shard breakdown decodes, and one
+    /// shard's cents are read from it. SHAPE from the keyed read of
+    /// 2026-09-02T14:35Z; every NUMBER here is synthetic.
+    #[test]
+    fn balance_breakdown_decodes_and_reads_one_shard() {
+        let json = r#"{
+            "balance": 12345,
+            "balance_dollars": "123.4567",
+            "portfolio_value": 20000,
+            "updated_ts": 1788359744,
+            "balance_breakdown": [
+                {"exchange_index": 0, "balance": "123.4567"},
+                {"exchange_index": 1, "balance": "0.0000"},
+                {"exchange_index": 2, "balance": "0.0000"},
+                {"exchange_index": 3, "balance": "0.0000"}
+            ]
+        }"#;
+        let r: BalanceResponse = serde_json::from_str(json).expect("balance must decode");
+        // The aggregate still decodes exactly as before.
+        assert_eq!(r.balance, 12345);
+        assert_eq!(r.balance_breakdown.as_ref().map(|b| b.len()), Some(4));
+        // Sub-cent remainders are TRUNCATED, matching the venue's own integer
+        // field (123.4567 dollars -> 12345c, not 12346c).
+        assert_eq!(r.shard_balance_cents(0), Some(12345));
+        // THE #700 GATE: the shard the MLB market lives on holds nothing, even
+        // though the aggregate reads healthy.
+        assert_eq!(r.shard_balance_cents(3), Some(0));
+        // A shard the account is not provisioned on is UNKNOWN, never 0 or the
+        // aggregate — the caller fails closed on `None`.
+        assert_eq!(r.shard_balance_cents(7), None);
+    }
+
+    /// An absent `balance_breakdown` (the spec's subaccount-restricted-key case)
+    /// decodes, and every shard lookup is `None`. It must NEVER fall back to the
+    /// aggregate — that fallback is exactly the 2026-08-31 refusal.
+    #[test]
+    fn absent_breakdown_yields_none_never_the_aggregate() {
+        let r: BalanceResponse =
+            serde_json::from_str(r#"{"balance":51128,"portfolio_value":0,"updated_ts":1}"#)
+                .expect("balance without a breakdown must still decode");
+        assert_eq!(r.balance, 51128);
+        assert_eq!(r.balance_breakdown, None);
+        assert_eq!(r.shard_balance_cents(0), None);
+        assert_eq!(r.shard_balance_cents(3), None);
+    }
+
+    /// Balance dollar strings FLOOR to cents; price dollar strings round
+    /// half-up. The two conversions are deliberately different — see
+    /// [`dollars_str_to_cents_floor`].
+    #[test]
+    fn balance_dollars_floor_rather_than_round_up() {
+        // The venue's own pairing, from the keyed read of 2026-09-02T14:35Z:
+        // balance_dollars "511.2887" alongside integer balance 51128.
+        assert_eq!(dollars_str_to_cents_floor("511.2887"), Some(51128));
+        // The price helper would have said 51129 — right for a quote, wrong for
+        // spendable money.
+        assert_eq!(dollars_str_to_cents("511.2887"), Some(51129));
+        assert_eq!(dollars_str_to_cents_floor("0.0000"), Some(0));
+        assert_eq!(dollars_str_to_cents_floor("-1.9999"), Some(-199));
+        assert_eq!(dollars_str_to_cents_floor(""), None);
+        assert_eq!(dollars_str_to_cents_floor("not-a-number"), None);
     }
 }

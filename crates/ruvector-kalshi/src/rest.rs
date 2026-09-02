@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 use crate::auth::Signer;
 use crate::models::{
-    BalanceResponse, FillsResponse, Market, MarketPosition, MarketsResponse, OrderAck, OrderRecord,
-    OrderbookResponse, OrderbookSnapshot, OrdersResponse, PositionsResponse, RestFill, V2AmendAck,
-    V2AmendOrder, V2CancelAck, V2CreateOrderRequest, V2OrderResponse,
+    BalanceResponse, FillsResponse, GetMarketResponse, Market, MarketPosition, MarketsResponse,
+    OrderAck, OrderRecord, OrderbookResponse, OrderbookSnapshot, OrdersResponse, PositionsResponse,
+    RestFill, V2AmendAck, V2AmendOrder, V2CancelAck, V2CreateOrderRequest, V2OrderResponse,
 };
 use crate::rate_limit::RateLimiter;
 use crate::{KalshiError, Result};
@@ -125,6 +125,24 @@ impl RestClient {
         Ok(resp.markets)
     }
 
+    /// Read ONE market by ticker (`GET /markets/{ticker}`). Signed READ — NOT
+    /// gated on `KALSHI_ENABLE_LIVE` (it mutates nothing).
+    ///
+    /// SONA #700: this is the read that sources [`Market::exchange_index`], the
+    /// shard an order-class request must carry. The crate previously bound only
+    /// the LIST endpoint, whose first-page/no-cursor honest gap makes it unfit
+    /// for a per-ticker pre-flight; this is one signed read with no pagination
+    /// surface.
+    ///
+    /// Live `GET /markets/KXMLBGAME-26SEP042010TORKC-TOR` [2026-09-02T16:18:31Z,
+    /// api.elections.kalshi.com]: HTTP 200, envelope `{"market": {...}}` with
+    /// `exchange_index: 3`.
+    pub async fn get_market(&self, ticker: &str) -> Result<Market> {
+        let path = format!("/markets/{ticker}");
+        let resp: GetMarketResponse = self.send(reqwest::Method::GET, &path, NO_BODY).await?;
+        Ok(resp.market)
+    }
+
     pub async fn orderbook(&self, ticker: &str) -> Result<OrderbookSnapshot> {
         let path = format!("/markets/{ticker}/orderbook");
         let resp: OrderbookResponse = self.send(reqwest::Method::GET, &path, NO_BODY).await?;
@@ -147,9 +165,50 @@ impl RestClient {
     /// Cancel an open order (DELETE /portfolio/events/orders/{id}). Refuses
     /// unless `KALSHI_ENABLE_LIVE=1`. The V2 ack does NOT echo the order; read
     /// the resulting state back via [`Self::get_order`].
-    pub async fn cancel_order(&self, order_id: &str) -> Result<V2CancelAck> {
+    ///
+    /// SONA #700 — the sharding asymmetry this signature exists to respect:
+    /// **create and amend take `exchange_index` in the JSON body; cancel takes
+    /// it in the QUERY string.** Before this change `cancel_order` built no
+    /// query at all, so a DELETE could only ever reach shard 0 — which silently
+    /// broke the ADR-042 §1 halt cancel-sweep for any order resting on shards
+    /// 1-3.
+    ///
+    /// Venue facts, Context7 `/openapi/kalshi_openapi_yaml` [2026-09-02]:
+    /// `DELETE /portfolio/events/orders/{order_id}` parameters —
+    /// "**exchange_index** (ExchangeIndex, query, optional)" and
+    /// "**market_ticker** (string, query, optional): Market ticker. Required
+    /// when exchange_index is -1 (auto)."
+    ///
+    /// `market_ticker` is plumbed because the spec makes it mandatory in the
+    /// `-1` auto-routing case; SONA does not use `-1` (unverified in production
+    /// on the order path), and passes the real ticker alongside the real shard
+    /// so the request is unambiguous either way. Both are `Option` so an
+    /// unsharded caller produces the byte-identical pre-#700 request.
+    ///
+    /// The signature payload is unaffected: [`Self::sig_path_for`] strips the
+    /// query string before signing (Kalshi signs the PATH only), which is the
+    /// same property `available_symbols_in_series` already relies on.
+    pub async fn cancel_order(
+        &self,
+        order_id: &str,
+        exchange_index: Option<i64>,
+        market_ticker: Option<&str>,
+    ) -> Result<V2CancelAck> {
         require_live_flag()?;
-        let path = format!("/portfolio/events/orders/{order_id}");
+        let mut params: Vec<String> = Vec::new();
+        if let Some(idx) = exchange_index {
+            params.push(format!("exchange_index={idx}"));
+        }
+        if let Some(t) = market_ticker {
+            if !t.is_empty() {
+                params.push(format!("market_ticker={t}"));
+            }
+        }
+        let path = if params.is_empty() {
+            format!("/portfolio/events/orders/{order_id}")
+        } else {
+            format!("/portfolio/events/orders/{order_id}?{}", params.join("&"))
+        };
         self.send(reqwest::Method::DELETE, &path, NO_BODY).await
     }
 
@@ -179,9 +238,26 @@ impl RestClient {
     /// READ — deliberately NOT gated on `KALSHI_ENABLE_LIVE` (only money-moving
     /// calls are). `balance` / `portfolio_value` are integer cents (issue #55
     /// item 7). Used by the SONA pre-flight balance gate.
-    pub async fn get_balance(&self) -> Result<BalanceResponse> {
-        self.send(reqwest::Method::GET, "/portfolio/balance", NO_BODY)
-            .await
+    ///
+    /// SONA #700 — the response now carries the modelled per-shard
+    /// `balance_breakdown`; read one shard's cents via
+    /// [`BalanceResponse::shard_balance_cents`]. The top-level `balance` is the
+    /// AGGREGATE and is not a safe gate on a sharded exchange.
+    ///
+    /// `exchange_index` is the optional server-side filter. Context7
+    /// `/openapi/kalshi_openapi_yaml` [2026-09-02] says it "has no effect" when
+    /// `subaccount` is omitted or 0 — but the keyed live read of
+    /// 2026-09-02T14:35Z shows the filter DOES take effect on the operator's
+    /// primary account (`?exchange_index=3` returned top-level `balance: 0`).
+    /// Spec and venue disagree, so SONA does not depend on the filter: the
+    /// unfiltered read plus `shard_balance_cents` is the path the money code
+    /// takes, and this parameter exists for probes and for parity with the spec.
+    pub async fn get_balance(&self, exchange_index: Option<i64>) -> Result<BalanceResponse> {
+        let path = match exchange_index {
+            Some(idx) => format!("/portfolio/balance?exchange_index={idx}"),
+            None => "/portfolio/balance".to_string(),
+        };
+        self.send(reqwest::Method::GET, &path, NO_BODY).await
     }
 
     /// One page of the member's market positions (GET /portfolio/positions).
@@ -463,6 +539,7 @@ mod tests {
             time_in_force: crate::models::TimeInForce::GoodTillCanceled,
             self_trade_prevention_type: crate::models::SelfTradePreventionType::TakerAtCross,
             client_order_id: "t-1".into(),
+            exchange_index: None,
         };
         let err = client.post_order(&order).await.unwrap_err();
         match err {
@@ -478,7 +555,10 @@ mod tests {
         std::env::remove_var("KALSHI_ENABLE_LIVE");
         let client =
             RestClient::new("https://trading-api.kalshi.com/trade-api/v2", test_signer()).unwrap();
-        let err = client.cancel_order("some-order-id").await.unwrap_err();
+        let err = client
+            .cancel_order("some-order-id", None, None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, KalshiError::Api { status: 0, .. }));
     }
 
@@ -494,6 +574,7 @@ mod tests {
             count: "1.00".into(),
             client_order_id: None,
             updated_client_order_id: None,
+            exchange_index: None,
         };
         let err = client
             .amend_order("some-order-id", &amend)

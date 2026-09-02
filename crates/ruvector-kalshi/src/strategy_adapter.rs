@@ -67,6 +67,12 @@ pub fn intent_to_order(
         time_in_force: TimeInForce::GoodTillCanceled,
         self_trade_prevention_type: SelfTradePreventionType::TakerAtCross,
         client_order_id: client_order_id.into(),
+        // SONA #700 — the shard is a property of the MARKET, not of the intent,
+        // so it is not resolvable here (this fn takes no venue client). The
+        // caller reads `Market.exchange_index` and sets it on the returned
+        // request before submitting. `None` serializes to nothing, leaving the
+        // body byte-identical to the pre-#700 request.
+        exchange_index: None,
     }
 }
 
@@ -90,7 +96,11 @@ mod tests {
 
     #[test]
     fn buy_yes_maps_to_bid_at_face_price() {
-        let o = intent_to_order("FED-DEC23", &intent(Action::Buy, Side::Yes, 24, 10), "cli-1");
+        let o = intent_to_order(
+            "FED-DEC23",
+            &intent(Action::Buy, Side::Yes, 24, 10),
+            "cli-1",
+        );
         assert_eq!(o.ticker, "FED-DEC23");
         assert_eq!(o.client_order_id, "cli-1");
         assert_eq!(o.side, V2Side::Bid);
