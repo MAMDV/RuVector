@@ -61,6 +61,16 @@ pub fn dollars_str_to_cents_floor(s: &str) -> Option<i64> {
     let body = s.trim_start_matches(['-', '+']);
     let (whole, frac) = body.split_once('.').unwrap_or((body, ""));
     let whole: i64 = whole.parse().ok()?;
+    // SONA #700 round-1 verify (V1 finding 6): the fractional part must be
+    // ENTIRELY digits. The first cut read each of the two cent slots with
+    // `.to_digit(10).unwrap_or(0)`, so `"5.x9"` silently became `Some(509)` —
+    // a non-digit in the tenths slot scored 0 while the next character was
+    // still consumed as hundredths. That over-reports a balance by up to 9c,
+    // which is the fail-OPEN direction on a gate whose whole job is to refuse.
+    // A malformed money string is an UNKNOWN balance, and unknown is `None`.
+    if !frac.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
     let mut digits = frac.chars();
     let d0 = digits.next().and_then(|c| c.to_digit(10)).unwrap_or(0) as i64;
     let d1 = digits.next().and_then(|c| c.to_digit(10)).unwrap_or(0) as i64;
@@ -252,7 +262,10 @@ pub struct Market {
     /// "**price_level_structure** (string) (required): Price level structure for
     /// this market, defining price ranges and tick sizes". Live values observed
     /// [2026-09-02T16:18:20Z / 16:18:31Z]: `"linear_cent"` (KXMLBGAME) and
-    /// `"tapered_deci_cent"` (KXBTC15M).
+    /// `"tapered_deci_cent"` (KXBTC15M); a third, `"deci_cent"` (uniform 0.1c),
+    /// was read on `KXMLB-26-BAL` [2026-09-02T17:00:03Z]. The list is a sample,
+    /// NOT an enumeration — the field is an unconstrained `Option<String>`
+    /// precisely so a fourth structure decodes rather than breaking the read.
     pub price_level_structure: Option<String>,
     /// Legal price bands + tick sizes for orders on this market. See
     /// [`PriceRange`] for the dated live citations.
@@ -650,12 +663,59 @@ impl BalanceResponse {
     /// venue's own integer-cents field — see that function's doc for the dated
     /// read.
     pub fn shard_balance_cents(&self, exchange_index: i64) -> Option<i64> {
-        self.balance_breakdown
-            .as_ref()?
+        match self.shard_balance_lookup(exchange_index) {
+            ShardBalanceLookup::Found(cents) => Some(cents),
+            _ => None,
+        }
+    }
+
+    /// The same lookup as [`Self::shard_balance_cents`], but naming WHICH of
+    /// the three "we do not know" states was observed (SONA #700 round-1
+    /// verify, V3 finding (c)).
+    ///
+    /// `Option<i64>` collapses three distinct facts onto one `None`, and the
+    /// adapter's refusal message was asserting the middle one ("carried no
+    /// `balance_breakdown` entry for shard N") in all three cases — an
+    /// operator-facing refusal naming a cause it had not established. Every
+    /// arm still fails closed; this only makes the refusal true.
+    pub fn shard_balance_lookup(&self, exchange_index: i64) -> ShardBalanceLookup {
+        let Some(breakdown) = self.balance_breakdown.as_ref() else {
+            return ShardBalanceLookup::BreakdownAbsent;
+        };
+        let Some(entry) = breakdown
             .iter()
             .find(|e| e.exchange_index == exchange_index)
-            .and_then(|e| dollars_str_to_cents_floor(&e.balance))
+        else {
+            return ShardBalanceLookup::NoEntryForShard;
+        };
+        match dollars_str_to_cents_floor(&entry.balance) {
+            Some(cents) => ShardBalanceLookup::Found(cents),
+            None => ShardBalanceLookup::UnparseableBalance(entry.balance.clone()),
+        }
     }
+}
+
+/// The outcome of a per-shard balance lookup — see
+/// [`BalanceResponse::shard_balance_lookup`].
+///
+/// Three of the four arms mean "this read did not establish a balance for that
+/// shard". They are deliberately distinct rather than one `None`: a money-path
+/// refusal has to be able to say which one it saw, and "the breakdown was
+/// missing entirely" (a subaccount-restricted key) is a different operational
+/// problem from "the account is not provisioned on that shard".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShardBalanceLookup {
+    /// The shard's entry was present and its dollar string parsed. Integer
+    /// cents, floored — see [`dollars_str_to_cents_floor`].
+    Found(i64),
+    /// The response carried no `balance_breakdown` array at all. Per the spec
+    /// this happens with a subaccount-restricted API key.
+    BreakdownAbsent,
+    /// The breakdown was present but held no row for this `exchange_index`.
+    NoEntryForShard,
+    /// The row existed and its `balance` string could not be parsed. Carries
+    /// the raw string so the refusal can quote what the venue actually sent.
+    UnparseableBalance(String),
 }
 
 /// One shard's balance inside [`BalanceResponse::balance_breakdown`] (spec
@@ -2179,6 +2239,98 @@ mod conformance_2026_09_02 {
         assert_eq!(r.balance_breakdown, None);
         assert_eq!(r.shard_balance_cents(0), None);
         assert_eq!(r.shard_balance_cents(3), None);
+    }
+
+    /// SONA #700 round-1 verify, V1 finding 6: the FULL input table the
+    /// adversary executed, plus the fail-open edge it found.
+    ///
+    /// The edge was `"5.x9"` → `Some(509)`: the retired implementation read
+    /// each cent slot with `.to_digit(10).unwrap_or(0)`, so a non-digit in the
+    /// tenths slot scored 0 while the next character was still consumed as
+    /// hundredths. That over-reports by up to 9c, which is the fail-OPEN
+    /// direction on a balance gate. A malformed money string is now `None`.
+    #[test]
+    fn balance_floor_parser_rejects_every_malformed_shape() {
+        // The eight inputs V1 executed against the first cut — all unchanged.
+        assert_eq!(dollars_str_to_cents_floor("511.2887"), Some(51128));
+        assert_eq!(dollars_str_to_cents_floor("0.0099"), Some(0));
+        assert_eq!(dollars_str_to_cents_floor("0.0100"), Some(1));
+        assert_eq!(dollars_str_to_cents_floor("0"), Some(0));
+        assert_eq!(dollars_str_to_cents_floor(""), None);
+        assert_eq!(dollars_str_to_cents_floor("abc"), None);
+        assert_eq!(dollars_str_to_cents_floor("-1.00"), Some(-100));
+        assert_eq!(dollars_str_to_cents_floor("1e2"), None);
+        assert_eq!(dollars_str_to_cents_floor(".50"), None);
+        assert_eq!(dollars_str_to_cents_floor("1,000.00"), None);
+
+        // THE FIXED EDGE, and its sibling.
+        assert_eq!(
+            dollars_str_to_cents_floor("5.x9"),
+            None,
+            "a non-digit in the fractional part must be UNKNOWN, never 509c"
+        );
+        assert_eq!(dollars_str_to_cents_floor("5. 9"), None);
+        // Any non-digit anywhere in the fraction, not just the tenths slot.
+        assert_eq!(dollars_str_to_cents_floor("5.9x"), None);
+        assert_eq!(dollars_str_to_cents_floor("5.99x99"), None);
+        // A bare whole number keeps working (empty fraction is all-digits).
+        assert_eq!(dollars_str_to_cents_floor("7"), Some(700));
+        assert_eq!(dollars_str_to_cents_floor("7."), Some(700));
+    }
+
+    /// SONA #700 round-1 verify, V3 finding (c): the three "we do not know"
+    /// states are told apart, so an operator-facing refusal can name the one it
+    /// actually saw instead of asserting the middle one every time.
+    #[test]
+    fn shard_balance_lookup_names_the_state_it_observed() {
+        let with_breakdown: BalanceResponse = serde_json::from_str(
+            r#"{
+                "balance": 12345,
+                "portfolio_value": 0,
+                "updated_ts": 1,
+                "balance_breakdown": [
+                    {"exchange_index": 0, "balance": "123.4567"},
+                    {"exchange_index": 3, "balance": "0.0000"},
+                    {"exchange_index": 9, "balance": "not-a-number"}
+                ]
+            }"#,
+        )
+        .expect("balance decodes");
+
+        assert_eq!(
+            with_breakdown.shard_balance_lookup(0),
+            ShardBalanceLookup::Found(12345)
+        );
+        // An explicit zero is FOUND, not unknown — the caller refuses it on the
+        // amount, which is a different (and truthful) message.
+        assert_eq!(
+            with_breakdown.shard_balance_lookup(3),
+            ShardBalanceLookup::Found(0)
+        );
+        assert_eq!(
+            with_breakdown.shard_balance_lookup(7),
+            ShardBalanceLookup::NoEntryForShard
+        );
+        assert_eq!(
+            with_breakdown.shard_balance_lookup(9),
+            ShardBalanceLookup::UnparseableBalance("not-a-number".to_string()),
+            "the raw string is carried so the refusal can quote the venue"
+        );
+
+        let no_breakdown: BalanceResponse =
+            serde_json::from_str(r#"{"balance":51128,"portfolio_value":0,"updated_ts":1}"#)
+                .expect("balance without a breakdown must still decode");
+        assert_eq!(
+            no_breakdown.shard_balance_lookup(0),
+            ShardBalanceLookup::BreakdownAbsent
+        );
+
+        // The Option-returning accessor still collapses all three unknowns to
+        // None, so every existing fail-closed caller is unchanged.
+        assert_eq!(with_breakdown.shard_balance_cents(0), Some(12345));
+        assert_eq!(with_breakdown.shard_balance_cents(7), None);
+        assert_eq!(with_breakdown.shard_balance_cents(9), None);
+        assert_eq!(no_breakdown.shard_balance_cents(0), None);
     }
 
     /// Balance dollar strings FLOOR to cents; price dollar strings round
