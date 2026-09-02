@@ -76,8 +76,19 @@ pub fn dollars_str_to_cents_floor(s: &str) -> Option<i64> {
     let d1 = digits.next().and_then(|c| c.to_digit(10)).unwrap_or(0) as i64;
     // Any remaining fractional digits are sub-cent and are DROPPED, never
     // rounded up — see the doc comment.
-    let cents = whole * 100 + d0 * 10 + d1;
-    Some(if neg { -cents } else { cents })
+    //
+    // SONA #700 round-2 verify (V4 residual on item G): the arithmetic is
+    // CHECKED. `whole * 100` was unchecked on venue-controlled input inside a
+    // money-path parser: `"99999999999999999.99"` wrapped to a large NEGATIVE
+    // in release and panicked in debug. The wrap happened to land negative, so
+    // the `<= 0` shard gate refused it and nothing was fail-open — but a
+    // money parser must not rely on which way an overflow happens to fall. An
+    // unrepresentable balance is an UNKNOWN balance, so it is `None`.
+    let cents = whole
+        .checked_mul(100)?
+        .checked_add(d0 * 10)?
+        .checked_add(d1)?;
+    Some(if neg { cents.checked_neg()? } else { cents })
 }
 
 /// Parse a Kalshi fixed-point count string (e.g. `"1.00"`, `"10.00"`) into an
@@ -2276,6 +2287,26 @@ mod conformance_2026_09_02 {
         // A bare whole number keeps working (empty fraction is all-digits).
         assert_eq!(dollars_str_to_cents_floor("7"), Some(700));
         assert_eq!(dollars_str_to_cents_floor("7."), Some(700));
+
+        // Round-2 verify residual: the arithmetic is CHECKED. This input wrapped
+        // to a large negative in release (and panicked in debug) before.
+        assert_eq!(
+            dollars_str_to_cents_floor("99999999999999999.99"),
+            None,
+            "an unrepresentable balance is UNKNOWN, not a wrapped negative"
+        );
+        assert_eq!(dollars_str_to_cents_floor("-99999999999999999.99"), None);
+        // The guard is a real boundary, not a blanket refusal of big numbers:
+        // the largest representable value still parses, its neighbour does not.
+        assert_eq!(
+            dollars_str_to_cents_floor("92233720368547757.00"),
+            Some(9_223_372_036_854_775_700)
+        );
+        assert_eq!(dollars_str_to_cents_floor("92233720368547759.00"), None);
+        assert_eq!(
+            dollars_str_to_cents_floor("1000000000.00"),
+            Some(100_000_000_000)
+        );
     }
 
     /// SONA #700 round-1 verify, V3 finding (c): the three "we do not know"
