@@ -475,10 +475,13 @@ pub struct V2CreateOrderRequest {
     /// `/openapi/kalshi_openapi_yaml` [2026-10-21] lists `post_only (boolean)`
     /// in the OPTIONAL tail of `POST /portfolio/events/orders`, with no stated
     /// cross behaviour; the live `openapi.yaml` [2026-10-21T01:29:58Z] has it as a
-    /// bare boolean on create-order (`:8717`). The changelog (2026-06-04) says a
-    /// crossing post-only order is cancelled with `last_update_reason`
-    /// `PostOnlyCrossCancel`. Whether the create call itself answers 201 or 4xx
-    /// on a cross is NOT documented; callers must handle both.
+    /// bare boolean on create-order (`:8717`). The live changelog documents the
+    /// cross reply: a crossing post-only create is REJECTED with error code
+    /// `"invalid order"`, details `"post only cross"` (entry of Oct 24, 2025,
+    /// read 2026-10-21T01:29Z; that entry made the batch endpoint "consistent
+    /// with single order creation"). A post-only order cancelled later reports
+    /// `last_update_reason` `PostOnlyCrossCancel` (entry of 2026-06-04). The HTTP
+    /// status of the rejection is not stated; callers match the details string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_only: Option<bool>,
 }
