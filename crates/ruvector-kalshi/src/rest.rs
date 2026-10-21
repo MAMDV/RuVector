@@ -13,9 +13,10 @@ use std::sync::Arc;
 
 use crate::auth::Signer;
 use crate::models::{
-    BalanceResponse, FillsResponse, GetMarketResponse, Market, MarketPosition, MarketsResponse,
-    OrderAck, OrderRecord, OrderbookResponse, OrderbookSnapshot, OrdersResponse, PositionsResponse,
-    RestFill, V2AmendAck, V2AmendOrder, V2CancelAck, V2CreateOrderRequest, V2OrderResponse,
+    BalanceResponse, FillsResponse, GetMarketResponse, HistoricalCutoff, Market, MarketPosition,
+    MarketsResponse, OrderAck, OrderRecord, OrderbookResponse, OrderbookSnapshot, OrdersResponse,
+    PositionsResponse, RestFill, V2AmendAck, V2AmendOrder, V2CancelAck, V2CreateOrderRequest,
+    V2OrderResponse,
 };
 use crate::rate_limit::RateLimiter;
 use crate::{KalshiError, Result};
@@ -460,6 +461,81 @@ impl RestClient {
 
     /// Runaway guard for [`Self::get_all_fills`]'s cursor walk.
     pub const FILLS_WALK_MAX_PAGES: usize = 50;
+
+    /// GET /historical/cutoff (SONA fresh-ticker baseline). READ — not gated.
+    /// The archive boundaries a "this market is too new to have archived
+    /// records" proof compares against; see [`HistoricalCutoff`].
+    pub async fn get_historical_cutoff(&self) -> Result<HistoricalCutoff> {
+        self.send(reqwest::Method::GET, "/historical/cutoff", NO_BODY)
+            .await
+    }
+
+    /// EVERY position on `ticker` in BOTH live states, for the PRIMARY
+    /// subaccount, cursor-walked to exhaustion (SONA fresh-ticker baseline).
+    ///
+    /// Context7 `/openapi/kalshi_openapi_yaml` [2026-10-21T04:01Z],
+    /// `GET /portfolio/positions`: `settlement_status=all` returns "all
+    /// positions in the live data set" (unsettled plus settled-not-archived);
+    /// `subaccount` "Defaults to 0" and is sent explicitly here so the scope
+    /// is stated, not inherited; `exchange_index` is OMITTED, which "return[s]
+    /// results from all exchange shards". Same fail-loud page cap as
+    /// [`Self::get_all_positions`].
+    pub async fn get_all_positions_all_states(&self, ticker: &str) -> Result<Vec<MarketPosition>> {
+        let mut all: Vec<MarketPosition> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..Self::POSITIONS_WALK_MAX_PAGES {
+            let mut path =
+                format!("/portfolio/positions?ticker={ticker}&settlement_status=all&subaccount=0");
+            if let Some(c) = cursor.as_deref() {
+                path.push_str(&format!("&cursor={c}"));
+            }
+            let page: PositionsResponse = self.send(reqwest::Method::GET, &path, NO_BODY).await?;
+            all.extend(page.market_positions);
+            match page.cursor.as_deref() {
+                Some("") | None => return Ok(all),
+                Some(next) => cursor = Some(next.to_string()),
+            }
+        }
+        Err(KalshiError::Api {
+            status: 0,
+            body: format!(
+                "get_all_positions_all_states: cursor walk exceeded {} pages — refusing to \
+                 return a possibly-truncated inventory",
+                Self::POSITIONS_WALK_MAX_PAGES
+            ),
+        })
+    }
+
+    /// EVERY order on `ticker`, ANY status, every subaccount and every shard,
+    /// cursor-walked to exhaustion (SONA fresh-ticker baseline). `status`,
+    /// `subaccount` and `exchange_index` are all omitted: Context7
+    /// [2026-10-21T04:01Z] says an omitted `subaccount` "defaults to all
+    /// subaccounts" and an omitted `exchange_index` returns "all exchange
+    /// shards". Orders canceled or executed before `orders_updated_ts` are
+    /// only in `GET /historical/orders`; resting orders are always here. Same
+    /// fail-loud page cap as [`Self::get_resting_orders`].
+    pub async fn get_all_orders(&self, ticker: &str) -> Result<Vec<OrderRecord>> {
+        let mut all: Vec<OrderRecord> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..Self::ORDERS_WALK_MAX_PAGES {
+            let page = self
+                .get_orders(None, Some(ticker), cursor.as_deref())
+                .await?;
+            all.extend(page.orders);
+            match page.cursor.as_deref() {
+                Some("") | None => return Ok(all),
+                Some(next) => cursor = Some(next.to_string()),
+            }
+        }
+        Err(KalshiError::Api {
+            status: 0,
+            body: format!(
+                "get_all_orders: cursor walk exceeded {} pages — refusing to return a \
+                 possibly-truncated inventory",
+                Self::ORDERS_WALK_MAX_PAGES
+            ),
+        })
+    }
 }
 
 fn require_live_flag() -> Result<()> {

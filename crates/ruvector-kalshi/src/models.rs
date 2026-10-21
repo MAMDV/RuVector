@@ -227,6 +227,17 @@ pub struct Market {
     pub open_interest: Option<i64>,
     pub close_time: Option<String>,
     pub expiration_time: Option<String>,
+    /// When the market was created and when it opened for trading, RFC 3339
+    /// (SONA fresh-ticker baseline, audit C6). Context7
+    /// `/openapi/kalshi_openapi_yaml` [2026-10-21T04:01Z]: `GetMarketResponse.market`
+    /// carries `created_time` and `open_time`, both `string (date-time)`,
+    /// both required. `Option` for forward-compat decode of older payloads;
+    /// a consumer that needs either must treat `None` as "unknown", never as
+    /// "old" or "new".
+    #[serde(default)]
+    pub created_time: Option<String>,
+    #[serde(default)]
+    pub open_time: Option<String>,
     // Post-migration dollar-string prices (the live source of truth).
     pub yes_bid_dollars: Option<String>,
     pub yes_ask_dollars: Option<String>,
@@ -856,6 +867,32 @@ pub struct OrdersResponse {
     pub cursor: Option<String>,
 }
 
+/// GET /historical/cutoff (SONA fresh-ticker baseline, audit C6). Context7
+/// `/openapi/kalshi_openapi_yaml` [2026-10-21T04:01Z], `GetHistoricalCutoffResponse`:
+/// - `trades_created_ts` (required): fills before it are only in
+///   `GET /historical/fills`;
+/// - `orders_updated_ts` (required): orders canceled or fully executed before
+///   it are only in `GET /historical/orders` (resting orders are always in
+///   `GET /portfolio/orders`);
+/// - `market_settled_ts` (required): markets settled before it are only in
+///   `GET /historical/markets`;
+/// - `market_positions_last_updated_ts` (optional): a backfill horizon for
+///   settled positions, "not a guaranteed archive-visibility boundary".
+///
+/// All RFC 3339 strings. `Option` for forward-compat decode; a consumer that
+/// relies on a boundary must treat `None` as unknown.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HistoricalCutoff {
+    #[serde(default)]
+    pub market_settled_ts: Option<String>,
+    #[serde(default)]
+    pub trades_created_ts: Option<String>,
+    #[serde(default)]
+    pub orders_updated_ts: Option<String>,
+    #[serde(default)]
+    pub market_positions_last_updated_ts: Option<String>,
+}
+
 /// Raw Kalshi WS envelope. `{"type": "...", "msg": {...}}`. `msg` is
 /// kept as a `Value` so unknown `type` tags don't fail the parse — the
 /// decoder routes on `msg_type`.
@@ -1387,6 +1424,34 @@ mod conformance_2026_01_28 {
         assert_eq!(m.yes_bid_cents(), Some(52)); // real value via dollar string
         assert_eq!(m.last_price_cents(), Some(0));
         assert_eq!(m.no_bid_cents(), None); // neither field present
+    }
+
+    /// SONA fresh-ticker baseline: `created_time` / `open_time` decode when
+    /// present and stay `None` (never a default instant) when absent.
+    #[test]
+    fn market_decodes_created_and_open_time_with_and_without() {
+        let with = r#"{"ticker":"KXBTC15M-26OCT210415-15","status":"active",
+            "created_time":"2026-10-21T03:00:00Z","open_time":"2026-10-21T04:00:00Z"}"#;
+        let m: Market = serde_json::from_str(with).expect("market must decode");
+        assert_eq!(m.created_time.as_deref(), Some("2026-10-21T03:00:00Z"));
+        assert_eq!(m.open_time.as_deref(), Some("2026-10-21T04:00:00Z"));
+        let without = r#"{"ticker":"KXBTC15M-26OCT210415-15","status":"active"}"#;
+        let m: Market = serde_json::from_str(without).expect("market must decode");
+        assert_eq!(m.created_time, None);
+        assert_eq!(m.open_time, None);
+    }
+
+    /// SONA fresh-ticker baseline: the cutoff envelope decodes the live shape,
+    /// and a missing optional field stays `None`.
+    #[test]
+    fn historical_cutoff_decodes_live_shape() {
+        let json = r#"{"market_settled_ts":"2026-08-21T00:00:00Z",
+            "trades_created_ts":"2026-08-21T00:00:00Z",
+            "orders_updated_ts":"2026-10-06T00:00:00Z"}"#;
+        let c: HistoricalCutoff = serde_json::from_str(json).expect("cutoff must decode");
+        assert_eq!(c.trades_created_ts.as_deref(), Some("2026-08-21T00:00:00Z"));
+        assert_eq!(c.orders_updated_ts.as_deref(), Some("2026-10-06T00:00:00Z"));
+        assert_eq!(c.market_positions_last_updated_ts, None);
     }
 }
 
