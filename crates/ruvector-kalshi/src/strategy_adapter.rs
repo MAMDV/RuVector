@@ -73,6 +73,9 @@ pub fn intent_to_order(
         // request before submitting. `None` serializes to nothing, leaving the
         // body byte-identical to the pre-#700 request.
         exchange_index: None,
+        // SONA C3 — post-only is an execution-style choice the caller makes;
+        // `None` leaves the body byte-identical.
+        post_only: None,
     }
 }
 

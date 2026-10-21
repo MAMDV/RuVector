@@ -467,6 +467,20 @@ pub struct V2CreateOrderRequest {
     /// NOT used by SONA: unverified in production on the order path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exchange_index: Option<i64>,
+    /// **Post-only (maker-only)** (SONA C3). `Some(true)` asks the venue to
+    /// cancel the order rather than let it take liquidity; `None` serializes to
+    /// nothing, so every existing caller's body stays byte-identical.
+    ///
+    /// Venue facts, verified at write time: Context7
+    /// `/openapi/kalshi_openapi_yaml` [2026-10-21] lists `post_only (boolean)`
+    /// in the OPTIONAL tail of `POST /portfolio/events/orders`, with no stated
+    /// cross behaviour; the live `openapi.yaml` [2026-10-21T01:29:58Z] has it as a
+    /// bare boolean on create-order (`:8717`). The changelog (2026-06-04) says a
+    /// crossing post-only order is cancelled with `last_update_reason`
+    /// `PostOnlyCrossCancel`. Whether the create call itself answers 201 or 4xx
+    /// on a cross is NOT documented; callers must handle both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_only: Option<bool>,
 }
 
 /// V2 create-order response -- a LIGHTWEIGHT flat ack (NOT the legacy
@@ -1175,6 +1189,7 @@ mod tests {
             self_trade_prevention_type: SelfTradePreventionType::TakerAtCross,
             client_order_id: "abc".into(),
             exchange_index: None,
+            post_only: None,
         };
         let s = serde_json::to_string(&o).unwrap();
         assert!(s.contains("\"side\":\"bid\""), "{s}");
@@ -1206,6 +1221,7 @@ mod tests {
             self_trade_prevention_type: SelfTradePreventionType::TakerAtCross,
             client_order_id: "cli-2".into(),
             exchange_index: None,
+            post_only: None,
         };
         let s = serde_json::to_string(&o).unwrap();
         assert!(s.contains("\"side\":\"ask\""), "{s}");
@@ -2133,6 +2149,7 @@ mod conformance_2026_09_02 {
             self_trade_prevention_type: SelfTradePreventionType::TakerAtCross,
             client_order_id: "idem-700".into(),
             exchange_index: None,
+            post_only: None,
         };
         let unsharded = serde_json::to_value(&base).expect("serialize");
         assert!(
@@ -2157,6 +2174,36 @@ mod conformance_2026_09_02 {
             v["ticker"],
             serde_json::json!("KXMLBGAME-26SEP042010TORKC-TOR")
         );
+    }
+
+    /// SONA C3 — `post_only` appears on the wire only when set: `None` keeps
+    /// the 7-field body, `Some(true)` adds exactly `"post_only":true`.
+    #[test]
+    fn create_order_serializes_post_only_only_when_present() {
+        let base = V2CreateOrderRequest {
+            ticker: "KXBTC15M-26OCT201900-00".into(),
+            side: V2Side::Bid,
+            count: "1.00".into(),
+            price: "0.47".into(),
+            time_in_force: TimeInForce::GoodTillCanceled,
+            self_trade_prevention_type: SelfTradePreventionType::TakerAtCross,
+            client_order_id: "idem-c3".into(),
+            exchange_index: None,
+            post_only: None,
+        };
+        let plain = serde_json::to_value(&base).expect("serialize");
+        assert!(plain.get("post_only").is_none(), "None must not reach the wire");
+        assert_eq!(plain.as_object().expect("object").len(), 7);
+
+        let maker = V2CreateOrderRequest {
+            post_only: Some(true),
+            ..base
+        };
+        let v = serde_json::to_value(&maker).expect("serialize");
+        assert_eq!(v["post_only"], serde_json::json!(true));
+        assert_eq!(v.as_object().expect("object").len(), 8);
+        let s = serde_json::to_string(&maker).expect("serialize");
+        assert!(s.contains("\"post_only\":true"), "{s}");
     }
 
     /// `POST /portfolio/events/orders/{id}/amend` takes the shard in the BODY

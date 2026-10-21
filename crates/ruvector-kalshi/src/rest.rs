@@ -540,6 +540,7 @@ mod tests {
             self_trade_prevention_type: crate::models::SelfTradePreventionType::TakerAtCross,
             client_order_id: "t-1".into(),
             exchange_index: None,
+            post_only: None,
         };
         let err = client.post_order(&order).await.unwrap_err();
         match err {
